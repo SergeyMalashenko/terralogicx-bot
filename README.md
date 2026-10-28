@@ -44,22 +44,40 @@ nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 `50:03:0070305:370` — через ~1–3 минуты (новый участок дольше) приходит
 `TerraLogicX_50-03-0070305-370.pdf`.
 
-## Удалённый режим (прокси)
+## Удалённый режим (USB-C линк + прокси)
 
-Бот на отдельной машине, engine — на своём хосте:
+Топология боевого развёртывания:
+
+```
+[удалённая машина 192.168.55.1]          [хост TerraLogicX 192.168.55.100]
+   terralogic-bot ──── MCP ────▶ terralogic-mcp 0.0.0.0:8004
+        │                              └─ NSPD/OSM/2GIS/RGIS/geodocs (127.0.0.1)
+        └─ api.telegram.org через TELEGRAM_PROXY
+```
+
+Engine слушает все интерфейсы (`--host 0.0.0.0`), поэтому туннель не
+нужен: бот ходит напрямую на `http://192.168.55.100:8004/mcp`.
+
+Деплой одной командой с хоста engine:
 
 ```bash
-# 1. Туннель до MCP engine (на машине бота)
-ssh -L 8004:127.0.0.1:8004 user@terralogic-host
+cd terralogic-bot
+scripts/deploy_remote.sh user@192.168.55.1
+```
 
-# 2. .env на машине бота
-TELEGRAM_BOT_TOKEN=...
-TERRALOGIC_MCP_URL=http://127.0.0.1:8004/mcp
-TELEGRAM_PROXY=http://proxy-host:3128   # если api.telegram.org закрыт
+Скрипт синхронизирует проект (rsync), создаёт venv, ставит пакет и пишет
+`.env` с `TERRALOGIC_MCP_URL=http://192.168.55.100:8004/mcp`. Остаётся
+вписать `TELEGRAM_BOT_TOKEN` и `TELEGRAM_PROXY` и запустить:
+
+```bash
+ssh user@192.168.55.1
+cd terralogic-bot
+set -a; . ./.env; set +a
+nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 ```
 
 Весь трафик бота: Telegram API (через прокси, если задан) и MCP engine
-(через туннель/сеть). Других зависимостей от инфраструктуры engine нет.
+(по USB-C линку). Других зависимостей от инфраструктуры engine нет.
 
 ## Конфигурация (env)
 
