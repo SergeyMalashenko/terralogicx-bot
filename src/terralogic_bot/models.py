@@ -1,16 +1,14 @@
-"""Результат сценария: готовый QuickReport в CaseStore."""
+"""Результат сценария: готовый QuickReport PDF для отправки."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from pydantic import BaseModel
 
 
 class QuickReportResult(BaseModel):
-    """Минимальный контракт для delivery: идентификаторы + путь к PDF."""
+    """Минимальный контракт для delivery: идентификаторы + байты PDF."""
 
     cadastral_number: str
     case_id: str
     collection_run_id: str
-    pdf_path: Path
+    pdf_bytes: bytes

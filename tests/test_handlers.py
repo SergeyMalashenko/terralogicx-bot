@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
-
 from terralogic_bot.config import Settings
 from terralogic_bot.errors import (
     ParcelNotFound,
@@ -52,11 +50,13 @@ class FakeMessage:
         self.documents.append((document, caption))
 
 
+PDF_BYTES = b"%PDF-1.4 canonical"
+
+
 class FakeClient:
     """Контролируемый backend: задержка, счётчики вызовов и параллелизма."""
 
-    def __init__(self, pdf_path: Path | None = None) -> None:
-        self.pdf_path = pdf_path
+    def __init__(self) -> None:
         self.calls: list[str] = []
         self.active = 0
         self.max_active = 0
@@ -73,12 +73,11 @@ class FakeClient:
             await asyncio.sleep(0.01)
             if self.error is not None:
                 raise self.error
-            assert self.pdf_path is not None
             return QuickReportResult(
                 cadastral_number=cadastral_number,
                 case_id="case-50-21-0030210-123",
                 collection_run_id="run-1",
-                pdf_path=self.pdf_path,
+                pdf_bytes=PDF_BYTES,
             )
         finally:
             self.active -= 1
@@ -88,7 +87,6 @@ def _settings(tmp_path: Path, max_concurrent: int = 2) -> Settings:
     return Settings(
         telegram_bot_token="test-token",
         terralogic_mcp_url="http://127.0.0.1:8004/mcp",
-        case_store_path=tmp_path,
         request_timeout_s=5.0,
         max_concurrent_reports=max_concurrent,
         log_level="DEBUG",
@@ -108,14 +106,6 @@ async def _wait_for(predicate, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("условие не наступило")
-
-
-@pytest.fixture()
-def pdf_file(tmp_path: Path) -> Path:
-    path = tmp_path / "canonical" / "quickreport.pdf"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"%PDF-1.4 canonical")
-    return path
 
 
 async def test_start(tmp_path):
@@ -141,8 +131,8 @@ async def test_invalid_cadastral_never_calls_backend(tmp_path):
     assert client.calls == []
 
 
-async def test_successful_report_delivery(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_successful_report_delivery(tmp_path):
+    client = FakeClient()
     router = build_router(client, _settings(tmp_path))
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
@@ -152,14 +142,12 @@ async def test_successful_report_delivery(tmp_path, pdf_file):
     assert message.answers[0].startswith("Принял участок 50:21:0030210:123")
     document, caption = message.documents[0]
     assert document.filename == "TerraLogicX_50-21-0030210-123.pdf"
+    assert document.data == PDF_BYTES
     assert caption == f"Экспресс-оценка участка\n{KN}"
-    # временная копия удалена, canonical артефакт на месте
-    assert not Path(document.path).exists()
-    assert pdf_file.read_bytes() == b"%PDF-1.4 canonical"
 
 
-async def test_parcel_not_found_message(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_parcel_not_found_message(tmp_path):
+    client = FakeClient()
     client.error = ParcelNotFound("нет участка")
     router = build_router(client, _settings(tmp_path))
     message = FakeMessage(KN)
@@ -168,8 +156,8 @@ async def test_parcel_not_found_message(tmp_path, pdf_file):
     assert message.answers[-1] == NOT_FOUND_TEXT.format(cadastral_number=KN)
 
 
-async def test_backend_unavailable_message(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_backend_unavailable_message(tmp_path):
+    client = FakeClient()
     client.error = TerraLogicUnavailable("backend down")
     router = build_router(client, _settings(tmp_path))
     message = FakeMessage(KN)
@@ -178,8 +166,8 @@ async def test_backend_unavailable_message(tmp_path, pdf_file):
     assert message.answers[-1] == UNAVAILABLE_TEXT
 
 
-async def test_generation_failure_message(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_generation_failure_message(tmp_path):
+    client = FakeClient()
     client.error = ReportGenerationFailed("нет pdf")
     router = build_router(client, _settings(tmp_path))
     message = FakeMessage(KN)
@@ -188,8 +176,8 @@ async def test_generation_failure_message(tmp_path, pdf_file):
     assert message.answers[-1] == FAILED_TEXT
 
 
-async def test_duplicate_active_request_rejected(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_duplicate_active_request_rejected(tmp_path):
+    client = FakeClient()
     client.gate = asyncio.Event()
     router = build_router(client, _settings(tmp_path))
     handler = _handler(router, "cadastral")
@@ -207,8 +195,8 @@ async def test_duplicate_active_request_rejected(tmp_path, pdf_file):
     assert client.calls == [KN]  # backend вызван один раз
 
 
-async def test_concurrency_limited_by_semaphore(tmp_path, pdf_file):
-    client = FakeClient(pdf_file)
+async def test_concurrency_limited_by_semaphore(tmp_path):
+    client = FakeClient()
     client.gate = asyncio.Event()
     router = build_router(client, _settings(tmp_path, max_concurrent=1))
     handler = _handler(router, "cadastral")

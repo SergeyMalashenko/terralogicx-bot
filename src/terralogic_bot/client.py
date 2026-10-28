@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
-from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import (
@@ -62,12 +62,10 @@ class McpTerraLogicClient:
         self,
         url: str,
         *,
-        case_store_path: Path,
         read_timeout_s: float = 900.0,
         call_tool: CallToolFn | None = None,
     ) -> None:
         self._url = url
-        self._case_store_path = case_store_path
         self._read_timeout_s = read_timeout_s
         self._call_tool_impl = call_tool or self._mcp_call_tool
 
@@ -81,21 +79,26 @@ class McpTerraLogicClient:
         if not case_id or not run_id:
             raise UnexpectedError("prepare_case вернул неполный результат")
 
-        report = await self._checked_call(
+        await self._checked_call(
             "terralogic_prepare_quickreport",
             {"case_id": case_id, "collection_run_id": run_id},
         )
-        pdf_relative = report.get("pdf_relative_path")
-        if not pdf_relative:
+        pdf = await self._checked_call(
+            "terralogic_get_report_pdf",
+            {"case_id": case_id, "collection_run_id": run_id},
+        )
+        content = pdf.get("content_base64")
+        if not content:
             raise ReportGenerationFailed("отчёт сформирован без PDF")
-        pdf_path = self._case_store_path / "cases" / case_id / str(pdf_relative)
-        if not pdf_path.is_file():
-            raise ReportGenerationFailed(f"PDF не найден: {pdf_path}")
+        try:
+            pdf_bytes = base64.b64decode(str(content), validate=True)
+        except ValueError as exc:
+            raise ReportGenerationFailed("PDF получен повреждённым") from exc
         return QuickReportResult(
             cadastral_number=cadastral_number,
             case_id=case_id,
             collection_run_id=run_id,
-            pdf_path=pdf_path,
+            pdf_bytes=pdf_bytes,
         )
 
     async def _checked_call(

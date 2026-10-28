@@ -12,19 +12,19 @@ Telegram-интерфейс доставки экспресс-оценок Terra
 
 ```
 Telegram user → КН текстом → terralogic-bot → terralogic-mcp
-    → terralogic_prepare_case (сбор + аналитика)
-    → terralogic_prepare_quickreport (QuickReport + PDF)
+    → terralogic_prepare_case      (сбор + аналитика)
+    → terralogic_prepare_quickreport (QuickReport + PDF в CaseStore)
+    → terralogic_get_report_pdf    (PDF base64 по MCP-каналу)
     → PDF документом пользователю
 ```
+
+PDF передаётся через MCP (base64), поэтому **бот может работать на
+удалённой машине** — общая файловая система с engine не требуется.
 
 ## Требования
 
 - Python ≥ 3.11;
-- запущенный контур TerraLogicX: `pynspd-mcp :8001`, `pyosm-mcp :8002`,
-  `py2gis-mcp :8003`, `terralogic-mcp :8004` (плюс `pyrgis-mcp :8005`,
-  `geodocs-mcp :8006` для региона 50);
-- PDF читается с общей файловой системы (single-host): боту нужен путь
-  к CaseStore engine;
+- сетевая доступность `terralogic-mcp` (порт 8004);
 - доступ к `api.telegram.org` (или `TELEGRAM_PROXY`).
 
 ## Установка и запуск
@@ -35,7 +35,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 cp .env.example .env   # вписать TELEGRAM_BOT_TOKEN от @BotFather
 
-# запуск (по образцу остальных сервисов workspace)
+# запуск
 set -a; . ./.env; set +a
 nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 ```
@@ -44,13 +44,29 @@ nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 `50:03:0070305:370` — через ~1–3 минуты (новый участок дольше) приходит
 `TerraLogicX_50-03-0070305-370.pdf`.
 
+## Удалённый режим (прокси)
+
+Бот на отдельной машине, engine — на своём хосте:
+
+```bash
+# 1. Туннель до MCP engine (на машине бота)
+ssh -L 8004:127.0.0.1:8004 user@terralogic-host
+
+# 2. .env на машине бота
+TELEGRAM_BOT_TOKEN=...
+TERRALOGIC_MCP_URL=http://127.0.0.1:8004/mcp
+TELEGRAM_PROXY=http://proxy-host:3128   # если api.telegram.org закрыт
+```
+
+Весь трафик бота: Telegram API (через прокси, если задан) и MCP engine
+(через туннель/сеть). Других зависимостей от инфраструктуры engine нет.
+
 ## Конфигурация (env)
 
 | Переменная | Default | Назначение |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — (обязательна) | токен @BotFather |
 | `TERRALOGIC_MCP_URL` | `http://127.0.0.1:8004/mcp` | MCP endpoint engine |
-| `TERRALOGIC_CASE_STORE_PATH` | `./terralogic-engine/case-store` | корень CaseStore (чтение PDF) |
 | `TERRALOGIC_REQUEST_TIMEOUT_S` | `900` | таймаут MCP-вызова (сбор идёт минуты) |
 | `MAX_CONCURRENT_REPORTS` | `2` | лимит одновременных формирований |
 | `TELEGRAM_PROXY` | — | прокси для api.telegram.org |

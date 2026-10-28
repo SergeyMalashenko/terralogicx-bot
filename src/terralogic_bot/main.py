@@ -21,7 +21,6 @@ async def _run(settings: Settings) -> None:
     )
     client = McpTerraLogicClient(
         settings.terralogic_mcp_url,
-        case_store_path=settings.case_store_path,
         read_timeout_s=settings.request_timeout_s,
     )
     dispatcher = Dispatcher()

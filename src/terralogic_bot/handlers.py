@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
-import tempfile
 import uuid
-from pathlib import Path
 from time import monotonic
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, Message
+from aiogram.types import BufferedInputFile, Message
 
 from .cadastral import parse_cadastral_number
 from .client import TerraLogicClient
@@ -92,13 +89,10 @@ async def _report_job(
         async with semaphore:
             result = await client.prepare_quickreport(cadastral_number)
         filename = report_filename(cadastral_number)
-        with tempfile.TemporaryDirectory(prefix="terralogic-bot-") as tmpdir:
-            temp_pdf = Path(tmpdir) / filename
-            shutil.copyfile(result.pdf_path, temp_pdf)
-            await message.answer_document(
-                FSInputFile(temp_pdf, filename=filename),
-                caption=f"Экспресс-оценка участка\n{cadastral_number}",
-            )
+        await message.answer_document(
+            BufferedInputFile(result.pdf_bytes, filename=filename),
+            caption=f"Экспресс-оценка участка\n{cadastral_number}",
+        )
         LOGGER.info(
             "%s done: user=%s kn=%s case=%s run=%s %.1fs",
             request_id,

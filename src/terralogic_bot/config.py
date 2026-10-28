@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
     terralogic_mcp_url: str
-    case_store_path: Path
     request_timeout_s: float
     max_concurrent_reports: int
     log_level: str
@@ -29,12 +27,6 @@ class Settings:
             telegram_bot_token=token,
             terralogic_mcp_url=source.get(
                 "TERRALOGIC_MCP_URL", "http://127.0.0.1:8004/mcp"
-            ),
-            case_store_path=Path(
-                source.get(
-                    "TERRALOGIC_CASE_STORE_PATH",
-                    "./terralogic-engine/case-store",
-                )
             ),
             request_timeout_s=float(
                 source.get("TERRALOGIC_REQUEST_TIMEOUT_S", "900")
