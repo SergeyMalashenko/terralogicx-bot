@@ -90,6 +90,18 @@ nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 Весь трафик бота: Telegram API (через прокси, если задан) и MCP engine
 (по USB-C линку). Других зависимостей от инфраструктуры engine нет.
 
+### Автозапуск на Jetson (systemd --user)
+
+Юнит `~/.config/systemd/user/terralogic-bot.service` уже настроен на
+боевой машине; включён linger — бот стартует при загрузке без входа
+пользователя. Управление:
+
+```bash
+systemctl --user status terralogic-bot     # состояние
+systemctl --user restart terralogic-bot    # перезапуск (после git pull)
+journalctl --user -u terralogic-bot -f     # логи
+```
+
 ## Конфигурация (env)
 
 | Переменная | Default | Назначение |
