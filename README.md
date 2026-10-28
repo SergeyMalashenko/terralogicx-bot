@@ -29,14 +29,25 @@ PDF передаётся через MCP (base64), поэтому **бот мож
 
 ## Установка и запуск
 
+### Вариант A: pixi (рекомендуется для Jetson / aarch64)
+
+```bash
+cd terralogic-bot
+pixi install          # создаст окружение и pixi.lock при первом запуске
+cp .env.example .env  # вписать TELEGRAM_BOT_TOKEN от @BotFather
+pixi run start        # .env подхватывается автоматически
+pixi run test         # юнит-тесты
+```
+
+### Вариант B: venv + pip
+
 ```bash
 cd terralogic-bot
 python3 -m venv .venv
 .venv/bin/pip install -e .
 cp .env.example .env   # вписать TELEGRAM_BOT_TOKEN от @BotFather
 
-# запуск
-set -a; . ./.env; set +a
+# запуск (.env подхватывается автоматически)
 nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 ```
 

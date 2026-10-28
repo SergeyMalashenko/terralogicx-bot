@@ -17,6 +17,10 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
+        if env is None:
+            from dotenv import load_dotenv
+
+            load_dotenv()  # .env рядом с запуском; реальные env-переменные важнее
         source = os.environ if env is None else env
         token = (source.get("TELEGRAM_BOT_TOKEN") or "").strip()
         if not token:
