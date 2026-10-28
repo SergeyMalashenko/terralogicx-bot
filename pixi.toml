@@ -1,12 +1,12 @@
 [workspace]
 channels = ["conda-forge"]
-name = "terralogic-bot"
+name = "terralogicx-bot"
 platforms = ["linux-aarch64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
 # Запуск бота (после `pixi install`); .env подхватывается автоматически
-start = "terralogic-bot"
+start = "terralogicx-bot"
 # Юнит-тесты без живого backend/Telegram
 test = "python -m pytest tests/ -q"
 
@@ -14,7 +14,7 @@ test = "python -m pytest tests/ -q"
 python = "3.12.*"
 
 [pypi-dependencies]
-terralogic-bot = { path = ".", editable = true }
+terralogicx-bot = { path = ".", editable = true }
 aiogram = ">=3.31.0, <4"
 mcp = ">=1.27, <2"
 pydantic = ">=2.10"

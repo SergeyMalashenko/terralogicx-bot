@@ -138,7 +138,7 @@ async def _report_job(
 
 def build_router(client: TerraLogicClient, settings: Settings) -> Router:
     """Router с замкнутыми зависимостями: client, лимиты, active jobs."""
-    router = Router(name="terralogic-bot")
+    router = Router(name="terralogicx-bot")
     semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
     jobs: dict[tuple[int, str], asyncio.Task] = {}
 

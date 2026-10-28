@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "terralogic-bot"
+name = "terralogicx-bot"
 version = "0.1.0"
 description = "Telegram delivery interface for TerraLogicX quick reports"
 readme = "README.md"
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-terralogic-bot = "terralogic_bot.main:main"
+terralogicx-bot = "terralogic_bot.main:main"
 
 [dependency-groups]
 test = [

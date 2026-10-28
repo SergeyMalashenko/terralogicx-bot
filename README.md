@@ -1,4 +1,4 @@
-# terralogic-bot
+# terralogicx-bot
 
 Telegram-интерфейс доставки экспресс-оценок TerraLogicX. Пользователь
 отправляет кадастровый номер — бот вызывает существующий use case
@@ -11,7 +11,7 @@ Telegram-интерфейс доставки экспресс-оценок Terra
 ## Поток
 
 ```
-Telegram user → КН текстом → terralogic-bot → terralogic-mcp
+Telegram user → КН текстом → terralogicx-bot → terralogic-mcp
     → terralogic_prepare_case      (сбор + аналитика)
     → terralogic_prepare_quickreport (QuickReport + PDF в CaseStore)
     → terralogic_get_report_pdf    (PDF base64 по MCP-каналу)
@@ -32,7 +32,7 @@ PDF передаётся через MCP (base64), поэтому **бот мож
 ### Вариант A: pixi (рекомендуется для Jetson / aarch64)
 
 ```bash
-cd terralogic-bot
+cd terralogicx-bot
 pixi install          # создаст окружение и pixi.lock при первом запуске
 cp .env.example .env  # вписать TELEGRAM_BOT_TOKEN от @BotFather
 pixi run start        # .env подхватывается автоматически
@@ -42,13 +42,13 @@ pixi run test         # юнит-тесты
 ### Вариант B: venv + pip
 
 ```bash
-cd terralogic-bot
+cd terralogicx-bot
 python3 -m venv .venv
 .venv/bin/pip install -e .
 cp .env.example .env   # вписать TELEGRAM_BOT_TOKEN от @BotFather
 
 # запуск (.env подхватывается автоматически)
-nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
+nohup .venv/bin/terralogicx-bot > /tmp/terralogicx-bot.log 2>&1 &
 ```
 
 Проверка: написать боту `/start`, затем кадастровый номер, например
@@ -61,7 +61,7 @@ nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 
 ```
 [удалённая машина 192.168.55.1]          [хост TerraLogicX 192.168.55.100]
-   terralogic-bot ──── MCP ────▶ terralogic-mcp 0.0.0.0:8004
+   terralogicx-bot ──── MCP ────▶ terralogic-mcp 0.0.0.0:8004
         │                              └─ NSPD/OSM/2GIS/RGIS/geodocs (127.0.0.1)
         └─ api.telegram.org через TELEGRAM_PROXY
 ```
@@ -72,7 +72,7 @@ Engine слушает все интерфейсы (`--host 0.0.0.0`), поэто
 Деплой одной командой с хоста engine:
 
 ```bash
-cd terralogic-bot
+cd terralogicx-bot
 scripts/deploy_remote.sh user@192.168.55.1
 ```
 
@@ -82,9 +82,9 @@ scripts/deploy_remote.sh user@192.168.55.1
 
 ```bash
 ssh user@192.168.55.1
-cd terralogic-bot
+cd terralogicx-bot
 set -a; . ./.env; set +a
-nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
+nohup .venv/bin/terralogicx-bot > /tmp/terralogicx-bot.log 2>&1 &
 ```
 
 Весь трафик бота: Telegram API (через прокси, если задан) и MCP engine
@@ -92,14 +92,14 @@ nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &
 
 ### Автозапуск на Jetson (systemd --user)
 
-Юнит `~/.config/systemd/user/terralogic-bot.service` уже настроен на
+Юнит `~/.config/systemd/user/terralogicx-bot.service` уже настроен на
 боевой машине; включён linger — бот стартует при загрузке без входа
 пользователя. Управление:
 
 ```bash
-systemctl --user status terralogic-bot     # состояние
-systemctl --user restart terralogic-bot    # перезапуск (после git pull)
-journalctl --user -u terralogic-bot -f     # логи
+systemctl --user status terralogicx-bot     # состояние
+systemctl --user restart terralogicx-bot    # перезапуск (после git pull)
+journalctl --user -u terralogicx-bot -f     # логи
 ```
 
 ## Конфигурация (env)

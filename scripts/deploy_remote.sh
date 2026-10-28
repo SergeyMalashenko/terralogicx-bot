@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Деплой terralogic-bot на удалённую машину по USB-C линку.
+# Деплой terralogicx-bot на удалённую машину по USB-C линку.
 #
 # Топология:
 #   удалённая машина (бот)  192.168.55.1
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 REMOTE="${1:-192.168.55.1}"
-REMOTE_DIR="${REMOTE_DIR:-terralogic-bot}"
+REMOTE_DIR="${REMOTE_DIR:-My_projects/terralogicx-bot}"
 ENGINE_URL="${ENGINE_URL:-http://192.168.55.100:8004/mcp}"
 
 cd "$(dirname "$0")/.."
@@ -39,4 +39,4 @@ EOF
 
 echo "== готово. Запуск на $REMOTE:"
 echo "  ssh $REMOTE 'cd $REMOTE_DIR && set -a; . ./.env; set +a; \\"
-echo "    nohup .venv/bin/terralogic-bot > /tmp/terralogic-bot.log 2>&1 &'"
+echo "    nohup .venv/bin/terralogicx-bot > /tmp/terralogicx-bot.log 2>&1 &'"
