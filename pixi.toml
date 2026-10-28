@@ -1,0 +1,15 @@
+[workspace]
+channels = ["conda-forge"]
+name = "terralogic-bot"
+platforms = ["linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+start = "python main.py"
+
+[dependencies]
+python = "3.12.*"
+
+[pypi-dependencies]
+aiogram = ">=3.31.0, <4"
+python-dotenv = ">=1.2.4, <2"
