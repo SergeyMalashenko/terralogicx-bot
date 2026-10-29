@@ -13,7 +13,7 @@ import uuid
 from time import monotonic
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, Message
 
 from .cadastral import parse_cadastral_number
@@ -21,10 +21,12 @@ from .client import TerraLogicClient
 from .config import Settings
 from .errors import (
     BotError,
+    CaseNotCollected,
     ParcelNotFound,
     SourceUnavailable,
     TerraLogicUnavailable,
 )
+from .models import CollectionStatus
 
 LOGGER = logging.getLogger("terralogic_bot")
 
@@ -60,6 +62,17 @@ INVALID_TEXT = (
 
 DUPLICATE_TEXT = "Экспресс-оценка этого участка уже формируется."
 
+STATUS_USAGE_TEXT = (
+    "Использование: /status 50:29:0030502:979\n\n"
+    "Команда показывает, что удалось и что не получилось собрать "
+    "по уже обработанному участку."
+)
+
+NOT_COLLECTED_TEXT = (
+    "По участку {cadastral_number} ещё нет собранных данных.\n\n"
+    "Отправьте кадастровый номер текстовым сообщением — сформирую отчёт."
+)
+
 NOT_FOUND_TEXT = (
     "Не удалось найти участок с кадастровым номером\n"
     "{cadastral_number}.\n\n"
@@ -81,6 +94,84 @@ FAILED_TEXT = (
 def report_filename(cadastral_number: str) -> str:
     """Безопасное предсказуемое имя PDF: TerraLogicX_50-21-0030210-123.pdf."""
     return f"TerraLogicX_{cadastral_number.replace(':', '-')}.pdf"
+
+
+_SOURCE_LABELS = {
+    "nspd": "НСПД",
+    "rgis": "РГИС Московской области",
+    "osm": "OpenStreetMap",
+    "dgis": "2GIS",
+    "documents_sync": "Реестр документов",
+    "geodocs": "Скачивание и извлечение документов",
+}
+_SOURCE_ICONS = {
+    "ok": "✅",
+    "partial": "⚠️",
+    "failed": "❌",
+    "skipped": "➖",
+    "not_applicable": "➖",
+}
+_DOC_TYPE_LABELS = {"pzz": "ПЗЗ", "general_plan": "Генплан"}
+_DOC_STATUS_LABELS = {
+    "extracted": ("✅", "данные извлечены"),
+    "downloaded": ("✅", "скачан"),
+    "pending": ("⏳", "зарегистрирован, ожидает загрузки"),
+    "not_found": ("❌", "не найден"),
+    "failed": ("❌", "ошибка загрузки"),
+}
+_COLLECTION_STATUS_LABELS = {
+    "complete": "собрано полностью",
+    "partial": "собрано частично",
+    "failed": "сбор не завершён",
+}
+
+
+def _short(text: str, limit: int = 120) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def render_collection_status(
+    cadastral_number: str, status: CollectionStatus
+) -> str:
+    """Статический текст сводки сбора для /status (без LLM)."""
+    header_status = _COLLECTION_STATUS_LABELS.get(
+        status.collection_status, status.collection_status
+    )
+    parts = [f"Сводка сбора: {cadastral_number}", f"Статус: {header_status}"]
+    if status.reused_collection:
+        parts[1] += " · данные из кэша"
+    if status.duration_s is not None:
+        parts[1] += f" · {status.duration_s:.0f} с"
+
+    if status.sources:
+        parts += ["", "Источники:"]
+        for entry in status.sources:
+            icon = _SOURCE_ICONS.get(entry.status, "❔")
+            label = _SOURCE_LABELS.get(entry.source, entry.source)
+            line = f"{icon} {label}"
+            if entry.status == "skipped":
+                line += " — не собирался"
+            elif entry.status == "not_applicable":
+                line += f" — неприменим{_short(', ' + entry.detail) if entry.detail else ''}"
+            elif entry.detail:
+                line += f" — {_short(entry.detail)}"
+            parts.append(line)
+
+    if status.documents:
+        parts += ["", "Документы:"]
+        for doc in status.documents:
+            icon, state = _DOC_STATUS_LABELS.get(doc.status, ("❔", doc.status))
+            label = _DOC_TYPE_LABELS.get(doc.doc_type or "", "Документ")
+            if doc.number:
+                label += f" № {doc.number}"
+            if doc.version_date:
+                label += f" от {doc.version_date}"
+            line = f"{icon} {label} — {state}"
+            if doc.reason:
+                line += f" ({_short(doc.reason)})"
+            parts.append(line)
+    return "\n".join(parts)
 
 
 async def _report_job(
@@ -152,6 +243,45 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
     @router.message(Command("help"))
     async def help_(message: Message) -> None:
         await message.answer(HELP_TEXT)
+
+    @router.message(Command("status"))
+    async def status(message: Message, command: CommandObject) -> None:
+        cadastral_number = parse_cadastral_number(command.args or "")
+        if cadastral_number is None:
+            await message.answer(STATUS_USAGE_TEXT)
+            return
+        user_id = message.from_user.id if message.from_user else 0
+        request_id = uuid.uuid4().hex[:8]
+        try:
+            summary = await client.get_collection_status(cadastral_number)
+        except CaseNotCollected:
+            await message.answer(
+                NOT_COLLECTED_TEXT.format(cadastral_number=cadastral_number)
+            )
+            LOGGER.info(
+                "%s status not collected: user=%s kn=%s",
+                request_id, user_id, cadastral_number,
+            )
+            return
+        except (SourceUnavailable, TerraLogicUnavailable) as exc:
+            await message.answer(UNAVAILABLE_TEXT)
+            LOGGER.warning(
+                "%s status unavailable: user=%s kn=%s error=%s",
+                request_id, user_id, cadastral_number, exc,
+            )
+            return
+        except BotError as exc:
+            await message.answer(FAILED_TEXT)
+            LOGGER.warning(
+                "%s status failed: user=%s kn=%s error=%s: %s",
+                request_id, user_id, cadastral_number, type(exc).__name__, exc,
+            )
+            return
+        await message.answer(render_collection_status(cadastral_number, summary))
+        LOGGER.info(
+            "%s status ok: user=%s kn=%s case=%s",
+            request_id, user_id, cadastral_number, summary.case_id,
+        )
 
     @router.message(F.text)
     async def cadastral(message: Message) -> None:

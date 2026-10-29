@@ -19,6 +19,10 @@ class ParcelNotFound(BotError):
     """Источник однозначно сообщил, что участок не найден."""
 
 
+class CaseNotCollected(BotError):
+    """По этому номеру ещё нет собранного кейса (read-only /status)."""
+
+
 class SourceUnavailable(BotError):
     """Временная недоступность одного из источников (retryable)."""
 

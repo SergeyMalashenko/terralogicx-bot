@@ -16,6 +16,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 from .errors import (
+    CaseNotCollected,
     InvalidCadastralNumber,
     ParcelNotFound,
     ReportGenerationFailed,
@@ -23,7 +24,12 @@ from .errors import (
     TerraLogicUnavailable,
     UnexpectedError,
 )
-from .models import QuickReportResult
+from .models import (
+    CollectionStatus,
+    DocumentStatus,
+    QuickReportResult,
+    SourceStatus,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +38,7 @@ CallToolFn = Callable[[str, Mapping[str, Any]], Awaitable[dict[str, Any]]]
 _ERROR_MAP = {
     "invalid_request": InvalidCadastralNumber,
     "not_found": ParcelNotFound,
+    "not_collected": CaseNotCollected,
     "collection_failed": SourceUnavailable,
     "internal_error": ReportGenerationFailed,
 }
@@ -43,6 +50,10 @@ class TerraLogicClient(Protocol):
     async def prepare_quickreport(
         self, cadastral_number: str
     ) -> QuickReportResult: ...
+
+    async def get_collection_status(
+        self, cadastral_number: str
+    ) -> CollectionStatus: ...
 
 
 def _group_leaves(exc: BaseExceptionGroup) -> list[BaseException]:
@@ -99,6 +110,29 @@ class McpTerraLogicClient:
             case_id=case_id,
             collection_run_id=run_id,
             pdf_bytes=pdf_bytes,
+        )
+
+    async def get_collection_status(self, cadastral_number: str) -> CollectionStatus:
+        """Сводка сбора по ранее обработанному номеру (read-only: never)."""
+        data = await self._checked_call(
+            "terralogic_prepare_case",
+            {"cadastral_number": cadastral_number, "refresh_policy": "never"},
+        )
+        collection = data.get("collection") or {}
+        return CollectionStatus(
+            case_id=str(data.get("case_id") or ""),
+            collection_run_id=str(data.get("collection_run_id") or ""),
+            collection_status=str(data.get("collection_status") or ""),
+            reused_collection=bool(data.get("reused_collection")),
+            duration_s=collection.get("duration_s"),
+            sources=[
+                SourceStatus.model_validate(entry)
+                for entry in collection.get("sources") or []
+            ],
+            documents=[
+                DocumentStatus.model_validate(entry)
+                for entry in collection.get("documents") or []
+            ],
         )
 
     async def _checked_call(

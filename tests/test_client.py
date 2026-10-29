@@ -8,6 +8,7 @@ import pytest
 
 from terralogic_bot.client import McpTerraLogicClient
 from terralogic_bot.errors import (
+    CaseNotCollected,
     InvalidCadastralNumber,
     ParcelNotFound,
     ReportGenerationFailed,
@@ -82,6 +83,7 @@ async def test_happy_path_calls_three_tools_and_returns_pdf_bytes():
     [
         ("invalid_request", InvalidCadastralNumber),
         ("not_found", ParcelNotFound),
+        ("not_collected", CaseNotCollected),
         ("collection_failed", SourceUnavailable),
         ("internal_error", ReportGenerationFailed),
         ("unknown_code", UnexpectedError),
@@ -103,6 +105,54 @@ async def test_transport_error_maps_to_unavailable():
     client = _client(fake_call)
     with pytest.raises(TerraLogicUnavailable):
         await client.prepare_quickreport("50:21:0030210:123")
+
+
+async def test_get_collection_status_uses_never_policy():
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(name, arguments):
+        calls.append((name, dict(arguments)))
+        return _envelope(
+            {
+                "case_id": CASE_ID,
+                "collection_run_id": RUN_ID,
+                "collection_status": "partial",
+                "reused_collection": True,
+                "collection": {
+                    "duration_s": 187.0,
+                    "sources": [
+                        {"source": "nspd", "status": "ok"},
+                        {"source": "osm", "status": "failed", "detail": "timeout"},
+                    ],
+                    "documents": [
+                        {
+                            "doc_type": "pzz",
+                            "number": "1749",
+                            "version_date": "2026-05-15",
+                            "status": "extracted",
+                        }
+                    ],
+                },
+            }
+        )
+
+    client = _client(fake_call)
+    status = await client.get_collection_status("50:29:0030502:979")
+
+    assert calls == [
+        (
+            "terralogic_prepare_case",
+            {"cadastral_number": "50:29:0030502:979", "refresh_policy": "never"},
+        )
+    ]
+    assert status.case_id == CASE_ID
+    assert status.collection_status == "partial"
+    assert status.reused_collection is True
+    assert status.duration_s == 187.0
+    assert status.sources[1].status == "failed"
+    assert status.sources[1].detail == "timeout"
+    assert status.documents[0].number == "1749"
+    assert status.documents[0].status == "extracted"
 
 
 async def test_timeout_maps_to_unavailable():

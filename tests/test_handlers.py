@@ -7,6 +7,7 @@ from pathlib import Path
 
 from terralogic_bot.config import Settings
 from terralogic_bot.errors import (
+    CaseNotCollected,
     ParcelNotFound,
     ReportGenerationFailed,
     TerraLogicUnavailable,
@@ -16,13 +17,20 @@ from terralogic_bot.handlers import (
     FAILED_TEXT,
     HELP_TEXT,
     INVALID_TEXT,
+    NOT_COLLECTED_TEXT,
     NOT_FOUND_TEXT,
     START_TEXT,
+    STATUS_USAGE_TEXT,
     UNAVAILABLE_TEXT,
     build_router,
     report_filename,
 )
-from terralogic_bot.models import QuickReportResult
+from terralogic_bot.models import (
+    CollectionStatus,
+    DocumentStatus,
+    QuickReportResult,
+    SourceStatus,
+)
 
 KN = "50:21:0030210:123"
 
@@ -62,6 +70,8 @@ class FakeClient:
         self.max_active = 0
         self.error: Exception | None = None
         self.gate: asyncio.Event | None = None
+        self.status_error: Exception | None = None
+        self.status_payload: CollectionStatus | None = None
 
     async def prepare_quickreport(self, cadastral_number: str) -> QuickReportResult:
         self.calls.append(cadastral_number)
@@ -81,6 +91,34 @@ class FakeClient:
             )
         finally:
             self.active -= 1
+
+    async def get_collection_status(self, cadastral_number: str) -> CollectionStatus:
+        if self.status_error is not None:
+            raise self.status_error
+        return self.status_payload or CollectionStatus(
+            case_id="case-50-21-0030210-123",
+            collection_run_id="run-1",
+            collection_status="partial",
+            reused_collection=True,
+            duration_s=187.0,
+            sources=[
+                SourceStatus(source="nspd", status="ok"),
+                SourceStatus(source="osm", status="failed", detail="osm timeout"),
+            ],
+            documents=[
+                DocumentStatus(
+                    doc_type="pzz",
+                    number="1749",
+                    version_date="2026-05-15",
+                    status="extracted",
+                ),
+                DocumentStatus(
+                    doc_type="general_plan",
+                    status="not_found",
+                    reason="агент: документ не найден",
+                ),
+            ],
+        )
 
 
 def _settings(tmp_path: Path, max_concurrent: int = 2) -> Settings:
@@ -215,3 +253,58 @@ async def test_concurrency_limited_by_semaphore(tmp_path):
 
 def test_report_filename_safe():
     assert report_filename("50:21:0030210:123") == "TerraLogicX_50-21-0030210-123.pdf"
+
+
+class _FakeCommand:
+    """Минимальный CommandObject: аргументы команды."""
+
+    def __init__(self, args: str | None) -> None:
+        self.args = args
+
+
+async def test_status_usage_without_argument(tmp_path):
+    router = build_router(FakeClient(), _settings(tmp_path))
+    message = FakeMessage("/status")
+    await _handler(router, "status")(message, _FakeCommand(None))
+    assert message.answers == [STATUS_USAGE_TEXT]
+
+
+async def test_status_usage_on_invalid_argument(tmp_path):
+    router = build_router(FakeClient(), _settings(tmp_path))
+    message = FakeMessage("/status привет")
+    await _handler(router, "status")(message, _FakeCommand("привет"))
+    assert message.answers == [STATUS_USAGE_TEXT]
+
+
+async def test_status_ok_renders_summary(tmp_path):
+    router = build_router(FakeClient(), _settings(tmp_path))
+    message = FakeMessage(f"/status {KN}")
+    await _handler(router, "status")(message, _FakeCommand(KN))
+
+    assert len(message.answers) == 1
+    text = message.answers[0]
+    assert f"Сводка сбора: {KN}" in text
+    assert "собрано частично" in text
+    assert "данные из кэша" in text
+    assert "✅ НСПД" in text
+    assert "❌ OpenStreetMap — osm timeout" in text
+    assert "✅ ПЗЗ № 1749 от 2026-05-15 — данные извлечены" in text
+    assert "❌ Генплан — не найден (агент: документ не найден)" in text
+
+
+async def test_status_not_collected(tmp_path):
+    client = FakeClient()
+    client.status_error = CaseNotCollected("no run")
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(f"/status {KN}")
+    await _handler(router, "status")(message, _FakeCommand(KN))
+    assert message.answers == [NOT_COLLECTED_TEXT.format(cadastral_number=KN)]
+
+
+async def test_status_backend_unavailable(tmp_path):
+    client = FakeClient()
+    client.status_error = TerraLogicUnavailable("refused")
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(f"/status {KN}")
+    await _handler(router, "status")(message, _FakeCommand(KN))
+    assert message.answers == [UNAVAILABLE_TEXT]
