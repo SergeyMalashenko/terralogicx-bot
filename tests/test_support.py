@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -190,6 +191,18 @@ def test_session_filter_matches_only_active_fresh_sessions(tmp_path):
         (time.time() - 7200, USER_ID),
     )
     assert filter_(message) is False
+    store.close()
+
+
+async def test_store_survives_calls_from_worker_thread(tmp_path):
+    """aiogram вызывает sync-фильтры через asyncio.to_thread — стор обязан
+    работать из чужого потока (регрессия: sqlite3.ProgrammingError)."""
+    store = SupportStore(tmp_path / "support.sqlite3")
+    store.open_session(USER_ID)
+    filter_ = _InSupportSession(store, ttl_s=3600.0)
+
+    assert await asyncio.to_thread(filter_, FakeMessage("текст")) is True
+    assert await asyncio.to_thread(store.resolve_user, 123) is None
     store.close()
 
 

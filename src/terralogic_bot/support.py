@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -87,39 +88,48 @@ class SupportStore:
     def __init__(self, path: str | Path) -> None:
         db_path = Path(path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.executescript(_SCHEMA)
+        # aiogram вызывает sync-фильтры через asyncio.to_thread — соединение
+        # обязано переживать чужой поток; операции короткие, под lock.
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
         self._conn.close()
 
     def open_session(self, user_id: int) -> None:
-        self._conn.execute(
-            "INSERT INTO sessions (user_id, updated_at) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET updated_at = excluded.updated_at",
-            (user_id, time.time()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sessions (user_id, updated_at) VALUES (?, ?) "
+                "ON CONFLICT(user_id) "
+                "DO UPDATE SET updated_at = excluded.updated_at",
+                (user_id, time.time()),
+            )
+            self._conn.commit()
 
     def touch_session(self, user_id: int) -> None:
-        self._conn.execute(
-            "UPDATE sessions SET updated_at = ? WHERE user_id = ?",
-            (time.time(), user_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE user_id = ?",
+                (time.time(), user_id),
+            )
+            self._conn.commit()
 
     def close_session(self, user_id: int) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM sessions WHERE user_id = ?", (user_id,)
-        )
-        self._conn.commit()
-        return cursor.rowcount > 0
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE user_id = ?", (user_id,)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def session_age(self, user_id: int) -> float | None:
         """Секунд с последней активности; None, если сессии нет."""
-        row = self._conn.execute(
-            "SELECT updated_at FROM sessions WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT updated_at FROM sessions WHERE user_id = ?", (user_id,)
+            ).fetchone()
         if row is None:
             return None
         return time.time() - float(row[0])
@@ -127,28 +137,31 @@ class SupportStore:
     def expire_sessions(self, ttl_s: float) -> list[int]:
         """Удалить сессии без активности дольше ttl_s; вернуть их user_id."""
         threshold = time.time() - ttl_s
-        rows = self._conn.execute(
-            "SELECT user_id FROM sessions WHERE updated_at < ?", (threshold,)
-        ).fetchall()
-        self._conn.execute(
-            "DELETE FROM sessions WHERE updated_at < ?", (threshold,)
-        )
-        self._conn.commit()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT user_id FROM sessions WHERE updated_at < ?", (threshold,)
+            ).fetchall()
+            self._conn.execute(
+                "DELETE FROM sessions WHERE updated_at < ?", (threshold,)
+            )
+            self._conn.commit()
         return [int(row[0]) for row in rows]
 
     def add_link(self, group_message_id: int, user_id: int) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO links (group_message_id, user_id, created_at)"
-            " VALUES (?, ?, ?)",
-            (group_message_id, user_id, time.time()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO links"
+                " (group_message_id, user_id, created_at) VALUES (?, ?, ?)",
+                (group_message_id, user_id, time.time()),
+            )
+            self._conn.commit()
 
     def resolve_user(self, group_message_id: int) -> int | None:
-        row = self._conn.execute(
-            "SELECT user_id FROM links WHERE group_message_id = ?",
-            (group_message_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_id FROM links WHERE group_message_id = ?",
+                (group_message_id,),
+            ).fetchone()
         return int(row[0]) if row is not None else None
 
 
