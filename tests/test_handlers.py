@@ -15,6 +15,8 @@ from terralogic_bot.errors import (
 from terralogic_bot.handlers import (
     DUPLICATE_TEXT,
     FAILED_TEXT,
+    FEEDBACK_FAILED_TEXT,
+    FEEDBACK_SAVED_TEXT,
     HELP_TEXT,
     INVALID_TEXT,
     NOT_COLLECTED_TEXT,
@@ -48,6 +50,8 @@ class FakeMessage:
         self.from_user = _FakeUser(user_id)
         self.answers: list[str] = []
         self.documents: list[tuple[object, str | None]] = []
+        self.document_kwargs: list[dict] = []
+        self.markup_removed = False
 
     async def answer(self, text: str, **kwargs: object) -> None:
         self.answers.append(text)
@@ -56,6 +60,24 @@ class FakeMessage:
         self, document: object, caption: str | None = None, **kwargs: object
     ) -> None:
         self.documents.append((document, caption))
+        self.document_kwargs.append(dict(kwargs))
+
+    async def edit_reply_markup(self, reply_markup: object = None) -> None:
+        if reply_markup is None:
+            self.markup_removed = True
+
+
+class FakeCallbackQuery:
+    """Минимальный контракт aiogram CallbackQuery для оценки отчёта."""
+
+    def __init__(self, data: str, user_id: int = 42) -> None:
+        self.data = data
+        self.from_user = _FakeUser(user_id)
+        self.message = FakeMessage(None, user_id)
+        self.answered: list[str | None] = []
+
+    async def answer(self, text: str | None = None, **kwargs: object) -> None:
+        self.answered.append(text)
 
 
 PDF_BYTES = b"%PDF-1.4 canonical"
@@ -72,6 +94,8 @@ class FakeClient:
         self.gate: asyncio.Event | None = None
         self.status_error: Exception | None = None
         self.status_payload: CollectionStatus | None = None
+        self.feedback_calls: list[tuple[str, str, int | None]] = []
+        self.feedback_error: Exception | None = None
 
     async def prepare_quickreport(self, cadastral_number: str) -> QuickReportResult:
         self.calls.append(cadastral_number)
@@ -119,6 +143,17 @@ class FakeClient:
                 ),
             ],
         )
+
+    async def submit_feedback(
+        self,
+        cadastral_number: str,
+        vote: str,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        if self.feedback_error is not None:
+            raise self.feedback_error
+        self.feedback_calls.append((cadastral_number, vote, user_id))
 
 
 def _settings(tmp_path: Path, max_concurrent: int = 2) -> Settings:
@@ -308,3 +343,65 @@ async def test_status_backend_unavailable(tmp_path):
     message = FakeMessage(f"/status {KN}")
     await _handler(router, "status")(message, _FakeCommand(KN))
     assert message.answers == [UNAVAILABLE_TEXT]
+
+
+# ---------------------------------------------------------------------------
+# Оценка отчёта 👍/👎
+# ---------------------------------------------------------------------------
+
+
+def _callback_handler(router, name: str):
+    for observer in router.callback_query.handlers:
+        if observer.callback.__name__ == name:
+            return observer.callback
+    raise AssertionError(f"callback handler {name} не зарегистрирован")
+
+
+async def test_report_document_carries_feedback_keyboard(tmp_path):
+    router = build_router(FakeClient(), _settings(tmp_path))
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+
+    keyboard = message.document_kwargs[0].get("reply_markup")
+    assert keyboard is not None
+    vote_row, support_row = keyboard.inline_keyboard
+    assert [button.text for button in vote_row] == ["👍", "👎"]
+    assert [button.callback_data for button in vote_row] == [
+        f"fb:up:{KN}",
+        f"fb:down:{KN}",
+    ]
+    assert [button.text for button in support_row] == ["✉️ Написать в поддержку"]
+    assert [button.callback_data for button in support_row] == ["support:start"]
+
+
+async def test_feedback_vote_saved(tmp_path):
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    query = FakeCallbackQuery(f"fb:up:{KN}", user_id=777)
+    await _callback_handler(router, "feedback")(query)
+
+    assert client.feedback_calls == [(KN, "up", 777)]
+    assert query.answered == [FEEDBACK_SAVED_TEXT]
+    assert query.message.markup_removed is True
+
+
+async def test_feedback_backend_failure_keeps_keyboard(tmp_path):
+    client = FakeClient()
+    client.feedback_error = TerraLogicUnavailable("backend down")
+    router = build_router(client, _settings(tmp_path))
+    query = FakeCallbackQuery(f"fb:down:{KN}")
+    await _callback_handler(router, "feedback")(query)
+
+    assert query.answered == [FEEDBACK_FAILED_TEXT]
+    assert query.message.markup_removed is False
+
+
+async def test_feedback_garbage_data_ignored(tmp_path):
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    for garbage in ("fb:sideways:50:21:0030210:123", "fb:up:мусор", "other:up:x"):
+        query = FakeCallbackQuery(garbage)
+        await _callback_handler(router, "feedback")(query)
+        assert query.answered == [None]
+    assert client.feedback_calls == []

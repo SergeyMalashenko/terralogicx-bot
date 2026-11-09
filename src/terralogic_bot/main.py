@@ -8,6 +8,7 @@ import logging
 from .client import McpTerraLogicClient
 from .config import Settings
 from .handlers import build_router
+from .support import SupportStore, build_support_router, support_sweeper
 
 
 async def _run(settings: Settings) -> None:
@@ -23,10 +24,20 @@ async def _run(settings: Settings) -> None:
         settings.terralogic_mcp_url,
         read_timeout_s=settings.request_timeout_s,
     )
+    support_store = SupportStore(settings.support_db_path)
     dispatcher = Dispatcher()
+    # поддержка первой: перехватывает сообщения активных сессий и группы
+    dispatcher.include_router(build_support_router(settings, support_store))
     dispatcher.include_router(build_router(client, settings))
     bot = Bot(settings.telegram_bot_token, session=session)
-    await dispatcher.start_polling(bot)
+    sweeper = asyncio.create_task(
+        support_sweeper(bot, support_store, settings.support_session_ttl_s)
+    )
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        sweeper.cancel()
+        support_store.close()
 
 
 def main() -> None:

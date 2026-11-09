@@ -13,8 +13,15 @@ import uuid
 from time import monotonic
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from .cadastral import parse_cadastral_number
 from .client import TerraLogicClient
@@ -27,6 +34,7 @@ from .errors import (
     TerraLogicUnavailable,
 )
 from .models import CollectionStatus
+from .support import support_start_button
 
 LOGGER = logging.getLogger("terralogic_bot")
 
@@ -51,7 +59,8 @@ START_TEXT = (
 HELP_TEXT = (
     "Отправьте кадастровый номер текстовым сообщением — "
     "я сформирую и пришлю экспресс-оценку участка в PDF.\n\n"
-    "Формат номера: 50:03:0070305:370"
+    "Формат номера: 50:03:0070305:370\n\n"
+    "/support — связаться со службой поддержки."
 )
 
 INVALID_TEXT = (
@@ -89,6 +98,44 @@ FAILED_TEXT = (
     "Не удалось сформировать отчёт по этому участку.\n\n"
     "Попробуйте повторить запрос позже."
 )
+
+FEEDBACK_SAVED_TEXT = "Спасибо! Ваша оценка сохранена."
+
+FEEDBACK_FAILED_TEXT = "Не удалось сохранить оценку. Попробуйте позже."
+
+_FEEDBACK_PREFIX = "fb"
+_FEEDBACK_VOTES = {"up", "down"}
+
+
+def feedback_keyboard(cadastral_number: str) -> InlineKeyboardMarkup:
+    """Клавиатура под PDF: 👍 / 👎 с привязкой к номеру + вход в поддержку."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👍",
+                    callback_data=f"{_FEEDBACK_PREFIX}:up:{cadastral_number}",
+                ),
+                InlineKeyboardButton(
+                    text="👎",
+                    callback_data=f"{_FEEDBACK_PREFIX}:down:{cadastral_number}",
+                ),
+            ],
+            [support_start_button()],
+        ]
+    )
+
+
+def parse_feedback_data(data: str) -> tuple[str, str] | None:
+    """callback_data «fb:up:50:21:0030210:123» → (vote, КН); мусор → None."""
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != _FEEDBACK_PREFIX:
+        return None
+    vote = parts[1]
+    cadastral_number = parse_cadastral_number(parts[2])
+    if vote not in _FEEDBACK_VOTES or cadastral_number is None:
+        return None
+    return vote, cadastral_number
 
 
 def report_filename(cadastral_number: str) -> str:
@@ -194,6 +241,7 @@ async def _report_job(
         await message.answer_document(
             BufferedInputFile(result.pdf_bytes, filename=filename),
             caption=f"Экспресс-оценка участка\n{cadastral_number}",
+            reply_markup=feedback_keyboard(cadastral_number),
         )
         LOGGER.info(
             "%s done: user=%s kn=%s case=%s run=%s %.1fs",
@@ -313,5 +361,45 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
             )
         )
         jobs[key] = task
+
+    @router.callback_query(F.data.startswith(f"{_FEEDBACK_PREFIX}:"))
+    async def feedback(query: CallbackQuery) -> None:
+        parsed = parse_feedback_data(query.data or "")
+        if parsed is None:
+            await query.answer()
+            return
+        vote, cadastral_number = parsed
+        user_id = query.from_user.id if query.from_user else None
+        try:
+            await client.submit_feedback(
+                cadastral_number,
+                vote,
+                user_id=user_id,
+            )
+        except BotError as exc:
+            LOGGER.warning(
+                "feedback failed: user=%s kn=%s vote=%s error=%s: %s",
+                user_id, cadastral_number, vote, type(exc).__name__, exc,
+            )
+            await query.answer(FEEDBACK_FAILED_TEXT)
+            return
+        except Exception:  # последний рубеж, traceback только в лог
+            LOGGER.exception(
+                "feedback unexpected: user=%s kn=%s", user_id, cadastral_number
+            )
+            await query.answer(FEEDBACK_FAILED_TEXT)
+            return
+        LOGGER.info(
+            "feedback saved: user=%s kn=%s vote=%s", user_id, cadastral_number, vote
+        )
+        await query.answer(FEEDBACK_SAVED_TEXT)
+        message = query.message
+        if message is not None:
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except TelegramAPIError:  # устаревшее сообщение — оценка уже сохранена
+                LOGGER.debug(
+                    "feedback keyboard not removed: kn=%s", cadastral_number
+                )
 
     return router

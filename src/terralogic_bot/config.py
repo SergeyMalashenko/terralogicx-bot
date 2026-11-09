@@ -14,6 +14,9 @@ class Settings:
     max_concurrent_reports: int
     log_level: str
     telegram_proxy: str | None = None
+    support_group_id: int | None = None
+    support_session_ttl_s: float = 3600.0
+    support_db_path: str = "data/support.sqlite3"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -27,6 +30,16 @@ class Settings:
             raise RuntimeError(
                 "TELEGRAM_BOT_TOKEN не задан — получите токен у @BotFather"
             )
+        raw_group = (source.get("SUPPORT_GROUP_ID") or "").strip()
+        support_group_id: int | None = None
+        if raw_group:
+            try:
+                support_group_id = int(raw_group)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "SUPPORT_GROUP_ID должен быть целым числом "
+                    "(id группы, например -1001234567890)"
+                ) from exc
         return cls(
             telegram_bot_token=token,
             terralogic_mcp_url=source.get(
@@ -38,4 +51,11 @@ class Settings:
             max_concurrent_reports=int(source.get("MAX_CONCURRENT_REPORTS", "2")),
             log_level=source.get("LOG_LEVEL", "INFO"),
             telegram_proxy=(source.get("TELEGRAM_PROXY") or "").strip() or None,
+            support_group_id=support_group_id,
+            support_session_ttl_s=float(
+                source.get("SUPPORT_SESSION_TTL_S", "3600")
+            ),
+            support_db_path=source.get(
+                "SUPPORT_DB_PATH", "data/support.sqlite3"
+            ),
         )
