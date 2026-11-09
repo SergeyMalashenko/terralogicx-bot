@@ -1,8 +1,10 @@
 """Клиент к публичному MCP API TerraLogicX (terralogic-mcp).
 
-Единственная операция бота: prepare_quickreport(кадастровый номер) → PDF.
-Внутри — два существующих инструмента engine: terralogic_prepare_case
-(сбор + аналитика) и terralogic_prepare_quickreport (рендер отчёта).
+Операции бота: prepare_quickreport(кадастровый номер) → PDF,
+get_collection_status (сводка сбора) и submit_feedback (оценка отчёта
+👍/👎 в общее хранилище). Внутри — существующие инструменты engine:
+terralogic_prepare_case, terralogic_prepare_quickreport,
+terralogic_get_report_pdf, terralogic_submit_feedback.
 Бот не импортирует internals terralogic-engine и не знает об LLM-контуре.
 """
 
@@ -54,6 +56,14 @@ class TerraLogicClient(Protocol):
     async def get_collection_status(
         self, cadastral_number: str
     ) -> CollectionStatus: ...
+
+    async def submit_feedback(
+        self,
+        cadastral_number: str,
+        vote: str,
+        *,
+        user_id: int | None = None,
+    ) -> None: ...
 
 
 def _group_leaves(exc: BaseExceptionGroup) -> list[BaseException]:
@@ -134,6 +144,22 @@ class McpTerraLogicClient:
                 for entry in collection.get("documents") or []
             ],
         )
+
+    async def submit_feedback(
+        self,
+        cadastral_number: str,
+        vote: str,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        """Оценка отчёта (up/down) → общее хранилище оценок TerraLogicX."""
+        arguments: dict[str, Any] = {
+            "cadastral_number": cadastral_number,
+            "vote": vote,
+        }
+        if user_id is not None:
+            arguments["user_id"] = user_id
+        await self._checked_call("terralogic_submit_feedback", arguments)
 
     async def _checked_call(
         self, name: str, arguments: Mapping[str, Any]

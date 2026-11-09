@@ -185,3 +185,40 @@ async def test_incomplete_case_result():
     client = _client(fake_call)
     with pytest.raises(UnexpectedError):
         await client.prepare_quickreport("50:21:0030210:123")
+
+
+async def test_submit_feedback_calls_tool_with_vote():
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(name, arguments):
+        calls.append((name, dict(arguments)))
+        return _envelope(
+            {
+                "cadastral_number": "50:21:0030210:123",
+                "vote": "up",
+                "case_id": CASE_ID,
+            }
+        )
+
+    client = _client(fake_call)
+    await client.submit_feedback("50:21:0030210:123", "up", user_id=777)
+
+    assert calls == [
+        (
+            "terralogic_submit_feedback",
+            {
+                "cadastral_number": "50:21:0030210:123",
+                "vote": "up",
+                "user_id": 777,
+            },
+        )
+    ]
+
+
+async def test_submit_feedback_error_mapping():
+    async def fake_call(name, arguments):
+        return _error("internal_error")
+
+    client = _client(fake_call)
+    with pytest.raises(ReportGenerationFailed):
+        await client.submit_feedback("50:21:0030210:123", "down")
