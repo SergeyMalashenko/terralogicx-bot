@@ -1,10 +1,12 @@
 """Клиент к публичному MCP API TerraLogicX (terralogic-mcp).
 
 Операции бота: prepare_quickreport(кадастровый номер) → PDF,
+prepare_quickreport_from_listing(ссылка на объявление) → PDF,
 get_collection_status (сводка сбора) и submit_feedback (оценка отчёта
 👍/👎 в общее хранилище). Внутри — существующие инструменты engine:
-terralogic_prepare_case, terralogic_prepare_quickreport,
-terralogic_get_report_pdf, terralogic_submit_feedback.
+terralogic_prepare_case, terralogic_prepare_case_from_listing,
+terralogic_prepare_quickreport, terralogic_get_report_pdf,
+terralogic_submit_feedback.
 Бот не импортирует internals terralogic-engine и не знает об LLM-контуре.
 """
 
@@ -20,6 +22,7 @@ from typing import Any, Protocol
 from .errors import (
     CaseNotCollected,
     InvalidCadastralNumber,
+    ListingResolutionFailed,
     ParcelNotFound,
     ReportGenerationFailed,
     SourceUnavailable,
@@ -29,6 +32,7 @@ from .errors import (
 from .models import (
     CollectionStatus,
     DocumentStatus,
+    ListingResolution,
     QuickReportResult,
     SourceStatus,
 )
@@ -42,6 +46,7 @@ _ERROR_MAP = {
     "not_found": ParcelNotFound,
     "not_collected": CaseNotCollected,
     "collection_failed": SourceUnavailable,
+    "listing_resolution_failed": ListingResolutionFailed,
     "internal_error": ReportGenerationFailed,
 }
 
@@ -51,6 +56,10 @@ class TerraLogicClient(Protocol):
 
     async def prepare_quickreport(
         self, cadastral_number: str
+    ) -> QuickReportResult: ...
+
+    async def prepare_quickreport_from_listing(
+        self, url: str
     ) -> QuickReportResult: ...
 
     async def get_collection_status(
@@ -100,6 +109,50 @@ class McpTerraLogicClient:
         if not case_id or not run_id:
             raise UnexpectedError("prepare_case вернул неполный результат")
 
+        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        return QuickReportResult(
+            cadastral_number=cadastral_number,
+            case_id=case_id,
+            collection_run_id=run_id,
+            pdf_bytes=pdf_bytes,
+        )
+
+    async def prepare_quickreport_from_listing(
+        self, url: str
+    ) -> QuickReportResult:
+        """Use case по ссылке на объявление: резолюция → сбор кейса → PDF."""
+        payload = await self._checked_call(
+            "terralogic_prepare_case_from_listing", {"url": url}
+        )
+        resolution_data = dict(payload.get("resolution") or {})
+        case = dict(payload.get("case") or {})
+        cadastral_number = str(resolution_data.get("cadastral_number") or "")
+        case_id = str(case.get("case_id") or "")
+        run_id = str(case.get("collection_run_id") or "")
+        if not cadastral_number or not case_id or not run_id:
+            raise UnexpectedError(
+                "prepare_case_from_listing вернул неполный результат"
+            )
+
+        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        return QuickReportResult(
+            cadastral_number=cadastral_number,
+            case_id=case_id,
+            collection_run_id=run_id,
+            pdf_bytes=pdf_bytes,
+            resolution=ListingResolution(
+                url=str(resolution_data.get("url") or url),
+                cadastral_number=cadastral_number,
+                title=resolution_data.get("title"),
+                address=resolution_data.get("address"),
+                warnings=[
+                    str(item) for item in resolution_data.get("warnings") or []
+                ],
+            ),
+        )
+
+    async def _fetch_quickreport_pdf(self, case_id: str, run_id: str) -> bytes:
+        """QuickReport + PDF для готового кейса (общий хвост use case)."""
         await self._checked_call(
             "terralogic_prepare_quickreport",
             {"case_id": case_id, "collection_run_id": run_id},
@@ -112,15 +165,9 @@ class McpTerraLogicClient:
         if not content:
             raise ReportGenerationFailed("отчёт сформирован без PDF")
         try:
-            pdf_bytes = base64.b64decode(str(content), validate=True)
+            return base64.b64decode(str(content), validate=True)
         except ValueError as exc:
             raise ReportGenerationFailed("PDF получен повреждённым") from exc
-        return QuickReportResult(
-            cadastral_number=cadastral_number,
-            case_id=case_id,
-            collection_run_id=run_id,
-            pdf_bytes=pdf_bytes,
-        )
 
     async def get_collection_status(self, cadastral_number: str) -> CollectionStatus:
         """Сводка сбора по ранее обработанному номеру (read-only: never)."""

@@ -8,6 +8,7 @@ from pathlib import Path
 from terralogic_bot.config import Settings
 from terralogic_bot.errors import (
     CaseNotCollected,
+    ListingResolutionFailed,
     ParcelNotFound,
     ReportGenerationFailed,
     TerraLogicUnavailable,
@@ -19,6 +20,8 @@ from terralogic_bot.handlers import (
     FEEDBACK_SAVED_TEXT,
     HELP_TEXT,
     INVALID_TEXT,
+    LISTING_ACCEPTED_TEXT,
+    LISTING_FAILED_TEXT,
     NOT_COLLECTED_TEXT,
     NOT_FOUND_TEXT,
     START_TEXT,
@@ -30,11 +33,16 @@ from terralogic_bot.handlers import (
 from terralogic_bot.models import (
     CollectionStatus,
     DocumentStatus,
+    ListingResolution,
     QuickReportResult,
     SourceStatus,
 )
 
 KN = "50:21:0030210:123"
+LISTING_URL = (
+    "https://www.avito.ru/domodedovo/zemelnye_uchastki/"
+    "uchastok_10_sot._izhs_8110049401"
+)
 
 
 class _FakeUser:
@@ -88,9 +96,11 @@ class FakeClient:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.listing_calls: list[str] = []
         self.active = 0
         self.max_active = 0
         self.error: Exception | None = None
+        self.listing_error: Exception | None = None
         self.gate: asyncio.Event | None = None
         self.status_error: Exception | None = None
         self.status_payload: CollectionStatus | None = None
@@ -112,6 +122,35 @@ class FakeClient:
                 case_id="case-50-21-0030210-123",
                 collection_run_id="run-1",
                 pdf_bytes=PDF_BYTES,
+            )
+        finally:
+            self.active -= 1
+
+    async def prepare_quickreport_from_listing(self, url: str) -> QuickReportResult:
+        self.listing_calls.append(url)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            await asyncio.sleep(0.01)
+            if self.listing_error is not None:
+                raise self.listing_error
+            return QuickReportResult(
+                cadastral_number="50:28:0040126:62",
+                case_id="case-50-28-0040126-62",
+                collection_run_id="run-1",
+                pdf_bytes=PDF_BYTES,
+                resolution=ListingResolution(
+                    url=url,
+                    cadastral_number="50:28:0040126:62",
+                    title="Участок 10 сот. (ИЖС)",
+                    address="МО, г. Домодедово, мкр-н Барыбино",
+                    warnings=[
+                        "area_mismatch: ...",
+                        "previously_registered_plot: ...",
+                    ],
+                ),
             )
         finally:
             self.active -= 1
@@ -405,3 +444,68 @@ async def test_feedback_garbage_data_ignored(tmp_path):
         await _callback_handler(router, "feedback")(query)
         assert query.answered == [None]
     assert client.feedback_calls == []
+
+
+async def test_listing_url_accepted_and_report_delivered(tmp_path):
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(LISTING_URL)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+
+    assert client.listing_calls == [LISTING_URL]
+    assert client.calls == []
+    assert message.answers[0] == LISTING_ACCEPTED_TEXT
+    resolution_note = message.answers[1]
+    assert "50:28:0040126:62" in resolution_note
+    assert "Барыбино" in resolution_note
+    assert "не совпадает с данными реестра" in resolution_note
+    assert "ранее учтённый" in resolution_note
+    document, caption = message.documents[0]
+    assert document.filename == "TerraLogicX_50-28-0040126-62.pdf"
+    assert caption == "Экспресс-оценка участка\n50:28:0040126:62"
+
+
+async def test_listing_url_inside_text(tmp_path):
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(f"Оцени участок: {LISTING_URL}")
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert client.listing_calls == [LISTING_URL]
+
+
+async def test_listing_resolution_failed_message(tmp_path):
+    client = FakeClient()
+    client.listing_error = ListingResolutionFailed("no_landplots_at_coordinates")
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(LISTING_URL)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.answers) == 2)
+    assert message.answers[-1] == LISTING_FAILED_TEXT
+    assert message.documents == []
+
+
+async def test_cadastral_number_preferred_over_listing_url(tmp_path):
+    """Номер и ссылка в одном сообщении — обрабатываем явный номер."""
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(f"{KN} {LISTING_URL}")
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert client.calls == [KN]
+    assert client.listing_calls == []
+
+
+async def test_listing_duplicate_active_request_rejected(tmp_path):
+    client = FakeClient()
+    client.gate = asyncio.Event()
+    router = build_router(client, _settings(tmp_path))
+    first = FakeMessage(LISTING_URL)
+    second = FakeMessage(LISTING_URL, user_id=42)
+    await _handler(router, "cadastral")(first)
+    await _wait_for(lambda: client.active == 1)
+    await _handler(router, "cadastral")(second)
+    assert second.answers == [DUPLICATE_TEXT]
+    client.gate.set()
+    await _wait_for(lambda: len(first.documents) == 1)

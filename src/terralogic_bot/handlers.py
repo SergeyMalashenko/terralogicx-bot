@@ -23,17 +23,22 @@ from aiogram.types import (
     Message,
 )
 
-from .cadastral import parse_cadastral_number
+from .cadastral import (
+    extract_cadastral_number,
+    parse_cadastral_number,
+    parse_listing_url,
+)
 from .client import TerraLogicClient
 from .config import Settings
 from .errors import (
     BotError,
     CaseNotCollected,
+    ListingResolutionFailed,
     ParcelNotFound,
     SourceUnavailable,
     TerraLogicUnavailable,
 )
-from .models import CollectionStatus
+from .models import CollectionStatus, ListingResolution
 from .support import support_start_button
 
 LOGGER = logging.getLogger("terralogic_bot")
@@ -48,7 +53,8 @@ START_TEXT = (
     "• Предварительную оценку строительного потенциала.\n"
     "• Рекомендации по дополнительным проверкам.\n\n"
     "🚀 Как получить отчёт:\n\n"
-    "Отправьте кадастровый номер участка, например 50:29:0030502:979.\n\n"
+    "Отправьте кадастровый номер участка, например 50:29:0030502:979, "
+    "или ссылку на объявление Авито.\n\n"
     "Дождитесь завершения анализа.\n\n"
     "Получите PDF-отчёт с результатами.\n\n"
     "ℹ️ Важно: Анализ проводится на основе доступных данных и не является "
@@ -57,16 +63,27 @@ START_TEXT = (
 )
 
 HELP_TEXT = (
-    "Отправьте кадастровый номер текстовым сообщением — "
-    "я сформирую и пришлю экспресс-оценку участка в PDF.\n\n"
+    "Отправьте кадастровый номер текстовым сообщением или ссылку на "
+    "объявление Авито — я сформирую и пришлю экспресс-оценку участка в PDF.\n\n"
     "Формат номера: 50:03:0070305:370\n\n"
     "/support — связаться со службой поддержки."
 )
 
 INVALID_TEXT = (
-    "Не удалось распознать кадастровый номер.\n\n"
-    "Проверьте номер и отправьте его ещё раз.\n\n"
-    "Например:\n50:03:0070305:370"
+    "Не удалось распознать кадастровый номер или ссылку на объявление.\n\n"
+    "Отправьте номер, например:\n50:03:0070305:370\n\n"
+    "или ссылку на объявление Авито."
+)
+
+LISTING_ACCEPTED_TEXT = (
+    "Принял ссылку на объявление.\n\n"
+    "Определяю участок по метке на карте и формирую экспресс-оценку."
+)
+
+LISTING_FAILED_TEXT = (
+    "Не удалось определить участок по ссылке на объявление.\n\n"
+    "Метка продавца может отсутствовать или не совпадать с границами "
+    "участка. Отправьте кадастровый номер, например 50:03:0070305:370."
 )
 
 DUPLICATE_TEXT = "Экспресс-оценка этого участка уже формируется."
@@ -178,6 +195,50 @@ def _short(text: str, limit: int = 120) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+_RESOLUTION_WARNING_LABELS = (
+    (
+        "area_mismatch",
+        (
+            "⚠️ Площадь в объявлении не совпадает с данными реестра — "
+            "метка продавца могла указывать на соседний участок."
+        ),
+    ),
+    (
+        "previously_registered_plot",
+        (
+            "⚠️ Участок имеет статус «ранее учтённый» — "
+            "его границы могут быть устаревшими."
+        ),
+    ),
+    (
+        "multiple_landplots_at_coordinates",
+        "⚠️ По метке найдено несколько участков — показан первый из них.",
+    ),
+)
+
+
+def render_resolution_warning(warning: str) -> str:
+    """Статический русский текст предупреждения резолюции (без LLM)."""
+    for prefix, label in _RESOLUTION_WARNING_LABELS:
+        if warning.startswith(prefix):
+            return label
+    return f"⚠️ {_short(warning)}"
+
+
+def render_resolution_note(resolution: ListingResolution) -> str:
+    """Сообщение о найденном по объявлению участке + предупреждения."""
+    parts = [f"По объявлению найден участок {resolution.cadastral_number}."]
+    if resolution.address:
+        parts.append(resolution.address)
+    if resolution.warnings:
+        parts.append("")
+        parts.extend(
+            render_resolution_warning(warning)
+            for warning in resolution.warnings
+        )
+    return "\n".join(parts)
+
+
 def render_collection_status(
     cadastral_number: str, status: CollectionStatus
 ) -> str:
@@ -224,55 +285,73 @@ def render_collection_status(
 async def _report_job(
     *,
     message: Message,
-    cadastral_number: str,
     client: TerraLogicClient,
     semaphore: asyncio.Semaphore,
     jobs: dict[tuple[int, str], asyncio.Task],
     key: tuple[int, str],
     request_id: str,
+    cadastral_number: str | None = None,
+    listing_url: str | None = None,
 ) -> None:
-    """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram."""
+    """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram.
+
+    Два входа: кадастровый номер либо ссылка на объявление (резолюция в КН
+    выполняется контуром engine на стороне сервера).
+    """
     started = monotonic()
     user_id = key[0]
+    label = cadastral_number or listing_url or "?"
     try:
         async with semaphore:
-            result = await client.prepare_quickreport(cadastral_number)
-        filename = report_filename(cadastral_number)
+            if listing_url is not None:
+                result = await client.prepare_quickreport_from_listing(listing_url)
+            elif cadastral_number is not None:
+                result = await client.prepare_quickreport(cadastral_number)
+            else:  # pragma: no cover - защищено диспетчеризацией handler'а
+                raise BotError("report job без входных данных")
+        resolved = result.cadastral_number
+        if result.resolution is not None:
+            await message.answer(render_resolution_note(result.resolution))
+        filename = report_filename(resolved)
         await message.answer_document(
             BufferedInputFile(result.pdf_bytes, filename=filename),
-            caption=f"Экспресс-оценка участка\n{cadastral_number}",
-            reply_markup=feedback_keyboard(cadastral_number),
+            caption=f"Экспресс-оценка участка\n{resolved}",
+            reply_markup=feedback_keyboard(resolved),
         )
         LOGGER.info(
             "%s done: user=%s kn=%s case=%s run=%s %.1fs",
             request_id,
             user_id,
-            cadastral_number,
+            resolved,
             result.case_id,
             result.collection_run_id,
             monotonic() - started,
         )
-    except ParcelNotFound:
-        await message.answer(
-            NOT_FOUND_TEXT.format(cadastral_number=cadastral_number)
+    except ListingResolutionFailed as exc:
+        await message.answer(LISTING_FAILED_TEXT)
+        LOGGER.info(
+            "%s listing resolution failed: user=%s input=%s error=%s",
+            request_id, user_id, label, exc,
         )
-        LOGGER.info("%s not found: user=%s kn=%s", request_id, user_id, cadastral_number)
+    except ParcelNotFound:
+        await message.answer(NOT_FOUND_TEXT.format(cadastral_number=label))
+        LOGGER.info("%s not found: user=%s kn=%s", request_id, user_id, label)
     except (SourceUnavailable, TerraLogicUnavailable) as exc:
         await message.answer(UNAVAILABLE_TEXT)
         LOGGER.warning(
             "%s unavailable: user=%s kn=%s error=%s",
-            request_id, user_id, cadastral_number, exc,
+            request_id, user_id, label, exc,
         )
     except BotError as exc:
         await message.answer(FAILED_TEXT)
         LOGGER.warning(
             "%s failed: user=%s kn=%s error=%s: %s",
-            request_id, user_id, cadastral_number, type(exc).__name__, exc,
+            request_id, user_id, label, type(exc).__name__, exc,
         )
     except Exception:  # последний рубеж, traceback только в лог
         await message.answer(FAILED_TEXT)
         LOGGER.exception(
-            "%s unexpected: user=%s kn=%s", request_id, user_id, cadastral_number
+            "%s unexpected: user=%s kn=%s", request_id, user_id, label
         )
     finally:
         jobs.pop(key, None)
@@ -333,33 +412,61 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
 
     @router.message(F.text)
     async def cadastral(message: Message) -> None:
-        cadastral_number = parse_cadastral_number(message.text or "")
-        if cadastral_number is None:
+        text = message.text or ""
+        cadastral_number = parse_cadastral_number(text)
+        listing_url = parse_listing_url(text)
+        if cadastral_number is None and listing_url is not None:
+            # «Номер + ссылка» в одном сообщении — явный номер важнее.
+            cadastral_number = extract_cadastral_number(text)
+        if cadastral_number is None and listing_url is None:
             await message.answer(INVALID_TEXT)
             return
         user_id = message.from_user.id if message.from_user else 0
-        key = (user_id, cadastral_number)
-        if key in jobs:
-            await message.answer(DUPLICATE_TEXT)
-            return
         request_id = uuid.uuid4().hex[:8]
-        LOGGER.info(
-            "%s accepted: user=%s kn=%s", request_id, user_id, cadastral_number
-        )
-        await message.answer(
-            f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку."
-        )
-        task = asyncio.create_task(
-            _report_job(
-                message=message,
-                cadastral_number=cadastral_number,
-                client=client,
-                semaphore=semaphore,
-                jobs=jobs,
-                key=key,
-                request_id=request_id,
+        if cadastral_number is not None:
+            key = (user_id, cadastral_number)
+            if key in jobs:
+                await message.answer(DUPLICATE_TEXT)
+                return
+            LOGGER.info(
+                "%s accepted: user=%s kn=%s", request_id, user_id, cadastral_number
             )
-        )
+            await message.answer(
+                f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку."
+            )
+            task = asyncio.create_task(
+                _report_job(
+                    message=message,
+                    client=client,
+                    semaphore=semaphore,
+                    jobs=jobs,
+                    key=key,
+                    request_id=request_id,
+                    cadastral_number=cadastral_number,
+                )
+            )
+        else:
+            assert listing_url is not None  # гарантировано веткой INVALID_TEXT
+            key = (user_id, listing_url)
+            if key in jobs:
+                await message.answer(DUPLICATE_TEXT)
+                return
+            LOGGER.info(
+                "%s accepted listing: user=%s url=%s",
+                request_id, user_id, listing_url,
+            )
+            await message.answer(LISTING_ACCEPTED_TEXT)
+            task = asyncio.create_task(
+                _report_job(
+                    message=message,
+                    client=client,
+                    semaphore=semaphore,
+                    jobs=jobs,
+                    key=key,
+                    request_id=request_id,
+                    listing_url=listing_url,
+                )
+            )
         jobs[key] = task
 
     @router.callback_query(F.data.startswith(f"{_FEEDBACK_PREFIX}:"))

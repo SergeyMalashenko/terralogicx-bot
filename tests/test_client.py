@@ -222,3 +222,89 @@ async def test_submit_feedback_error_mapping():
     client = _client(fake_call)
     with pytest.raises(ReportGenerationFailed):
         await client.submit_feedback("50:21:0030210:123", "down")
+
+
+LISTING_URL = (
+    "https://www.avito.ru/domodedovo/zemelnye_uchastki/"
+    "uchastok_10_sot._izhs_8110049401"
+)
+
+
+def _fake_listing_backend(pdf_content: str | None = None):
+    if pdf_content is None:
+        pdf_content = base64.b64encode(PDF_BYTES).decode("ascii")
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(name, arguments):
+        calls.append((name, dict(arguments)))
+        if name == "terralogic_prepare_case_from_listing":
+            return _envelope(
+                {
+                    "resolution": {
+                        "url": arguments["url"],
+                        "cadastral_number": "50:28:0040126:62",
+                        "title": "Участок 10 сот. (ИЖС)",
+                        "address": "МО, г. Домодедово, мкр-н Барыбино",
+                        "warnings": ["area_mismatch: ..."],
+                    },
+                    "case": {"case_id": CASE_ID, "collection_run_id": RUN_ID},
+                }
+            )
+        if name == "terralogic_prepare_quickreport":
+            return _envelope({"report_id": "report-1"})
+        return _envelope({"content_base64": pdf_content})
+
+    return calls, fake_call
+
+
+async def test_listing_happy_path_returns_pdf_and_resolution():
+    calls, fake_call = _fake_listing_backend()
+    client = _client(fake_call)
+    result = await client.prepare_quickreport_from_listing(LISTING_URL)
+
+    assert calls[0] == (
+        "terralogic_prepare_case_from_listing",
+        {"url": LISTING_URL},
+    )
+    assert calls[1] == (
+        "terralogic_prepare_quickreport",
+        {"case_id": CASE_ID, "collection_run_id": RUN_ID},
+    )
+    assert calls[2] == (
+        "terralogic_get_report_pdf",
+        {"case_id": CASE_ID, "collection_run_id": RUN_ID},
+    )
+    assert result.cadastral_number == "50:28:0040126:62"
+    assert result.pdf_bytes == PDF_BYTES
+    assert result.resolution is not None
+    assert result.resolution.url == LISTING_URL
+    assert result.resolution.title == "Участок 10 сот. (ИЖС)"
+    assert result.resolution.warnings == ["area_mismatch: ..."]
+
+
+async def test_listing_resolution_failed_maps_to_dedicated_error():
+    from terralogic_bot.errors import ListingResolutionFailed
+
+    async def fake_call(name, arguments):
+        return _error(
+            "listing_resolution_failed",
+            "no_landplots_at_coordinates: the pin may be approximate",
+        )
+
+    client = _client(fake_call)
+    with pytest.raises(ListingResolutionFailed, match="no_landplots"):
+        await client.prepare_quickreport_from_listing(LISTING_URL)
+
+
+async def test_listing_incomplete_payload_is_unexpected_error():
+    async def fake_call(name, arguments):
+        return _envelope(
+            {
+                "resolution": {"cadastral_number": ""},
+                "case": {"case_id": "", "collection_run_id": ""},
+            }
+        )
+
+    client = _client(fake_call)
+    with pytest.raises(UnexpectedError):
+        await client.prepare_quickreport_from_listing(LISTING_URL)

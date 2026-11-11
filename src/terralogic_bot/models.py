@@ -5,6 +5,16 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 
+class ListingResolution(BaseModel):
+    """Резолюция ссылки на объявление в кадастровый номер (контур engine)."""
+
+    url: str
+    cadastral_number: str
+    title: str | None = None
+    address: str | None = None
+    warnings: list[str] = []
+
+
 class QuickReportResult(BaseModel):
     """Минимальный контракт для delivery: идентификаторы + байты PDF."""
 
@@ -12,6 +22,7 @@ class QuickReportResult(BaseModel):
     case_id: str
     collection_run_id: str
     pdf_bytes: bytes
+    resolution: ListingResolution | None = None
 
 
 class SourceStatus(BaseModel):

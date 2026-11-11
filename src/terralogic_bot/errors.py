@@ -19,6 +19,10 @@ class ParcelNotFound(BotError):
     """Источник однозначно сообщил, что участок не найден."""
 
 
+class ListingResolutionFailed(BotError):
+    """Не удалось определить кадастровый номер по ссылке на объявление."""
+
+
 class CaseNotCollected(BotError):
     """По этому номеру ещё нет собранного кейса (read-only /status)."""
 
