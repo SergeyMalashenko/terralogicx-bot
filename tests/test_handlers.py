@@ -97,10 +97,12 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.listing_calls: list[str] = []
+        self.coords_calls: list[str] = []
         self.active = 0
         self.max_active = 0
         self.error: Exception | None = None
         self.listing_error: Exception | None = None
+        self.coords_error: Exception | None = None
         self.gate: asyncio.Event | None = None
         self.status_error: Exception | None = None
         self.status_payload: CollectionStatus | None = None
@@ -150,6 +152,31 @@ class FakeClient:
                         "area_mismatch: ...",
                         "previously_registered_plot: ...",
                     ],
+                ),
+            )
+        finally:
+            self.active -= 1
+
+    async def prepare_quickreport_at_coords(self, coordinates: str) -> QuickReportResult:
+        self.coords_calls.append(coordinates)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            await asyncio.sleep(0.01)
+            if self.coords_error is not None:
+                raise self.coords_error
+            return QuickReportResult(
+                cadastral_number="50:23:0000000:120934",
+                case_id="case-50-23-0000000-120934",
+                collection_run_id="run-1",
+                pdf_bytes=PDF_BYTES,
+                resolution=ListingResolution(
+                    url=coordinates,
+                    cadastral_number="50:23:0000000:120934",
+                    warnings=[],
+                    source="coordinates",
                 ),
             )
         finally:
@@ -509,6 +536,59 @@ async def test_listing_resolution_failed_lists_nearby_parcels(tmp_path):
     assert "50:13:0020304:162" in answer
     assert "4.85 сот." in answer
     assert "50:13:0020303:260" in answer
+    assert message.documents == []
+
+
+COORDS = "55.488626, 38.009447"
+
+
+async def test_coords_message_produces_report(tmp_path):
+    """Координаты «lat, lon» запускают coords-контур и отдают PDF."""
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(COORDS)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert client.coords_calls == [COORDS]
+    assert client.calls == []
+    assert client.listing_calls == []
+    note = message.answers[1]
+    assert note.startswith("По координатам найден участок 50:23:0000000:120934.")
+
+
+async def test_coords_resolution_failed_lists_nearby_parcels(tmp_path):
+    """Пустая точка: бот объясняет и перечисляет участки рядом."""
+    client = FakeClient()
+    client.coords_error = ListingResolutionFailed(
+        "no_landplots_at_coordinates",
+        nearby=[
+            {
+                "cadastral_number": "50:23:0000000:120935",
+                "distance_m": 100.0,
+                "area_m2": 900.0,
+            },
+        ],
+    )
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(COORDS)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.answers) == 2)
+    answer = message.answers[-1]
+    assert "В указанной точке нет зарегистрированного участка" in answer
+    assert "50:23:0000000:120935" in answer
+    assert "9 сот." in answer
+    assert message.documents == []
+
+
+async def test_coords_resolution_failed_without_nearby(tmp_path):
+    """Пустая точка без nearby — общий текст про координаты."""
+    client = FakeClient()
+    client.coords_error = ListingResolutionFailed("no cadastral candidates")
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(COORDS)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.answers) == 2)
+    assert "Не удалось определить участок по координатам" in message.answers[-1]
     assert message.documents == []
 
 

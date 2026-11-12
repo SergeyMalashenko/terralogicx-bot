@@ -96,3 +96,31 @@ def test_extract_number_from_mixed_text():
 def test_extract_returns_none_without_number():
     assert extract_cadastral_number(LISTING_URL) is None
     assert extract_cadastral_number("") is None
+
+
+from terralogic_bot.cadastral import parse_coordinates
+
+
+def test_parse_coordinates_plain():
+    assert parse_coordinates("55.488626, 38.009447") == "55.488626, 38.009447"
+
+
+def test_parse_coordinates_without_space():
+    assert parse_coordinates("55.488626,38.009447") == "55.488626, 38.009447"
+
+
+def test_parse_coordinates_inside_text():
+    text = "Участок тут: 55.488626, 38.009447 — посмотри"
+    assert parse_coordinates(text) == "55.488626, 38.009447"
+
+
+def test_parse_coordinates_rejects_out_of_range():
+    assert parse_coordinates("95.488626, 38.009447") is None
+    assert parse_coordinates("55.488626, 238.009447") is None
+
+
+def test_parse_coordinates_rejects_non_coords():
+    assert parse_coordinates("50:21:0030210:123") is None
+    assert parse_coordinates("10,5 сотки") is None
+    assert parse_coordinates("привет") is None
+    assert parse_coordinates("") is None

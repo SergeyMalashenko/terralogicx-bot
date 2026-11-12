@@ -287,6 +287,61 @@ async def test_listing_happy_path_returns_pdf_and_resolution():
     assert result.resolution.warnings == ["area_mismatch: ..."]
 
 
+COORDS = "55.488626, 38.009447"
+
+
+def _fake_coords_backend():
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(name, arguments):
+        calls.append((name, dict(arguments)))
+        if name == "terralogic_prepare_case_at_coords":
+            return _envelope(
+                {
+                    "resolution": {
+                        "source": "coordinates",
+                        "url": arguments["coordinates"],
+                        "cadastral_number": "50:23:0000000:120934",
+                        "latitude": 55.488626,
+                        "longitude": 38.009447,
+                        "warnings": [],
+                    },
+                    "case": {"case_id": CASE_ID, "collection_run_id": RUN_ID},
+                }
+            )
+        if name == "terralogic_prepare_quickreport":
+            return _envelope({"report_id": "report-1"})
+        return _envelope({"content_base64": base64.b64encode(PDF_BYTES).decode()})
+
+    return calls, fake_call
+
+
+async def test_coords_happy_path_returns_pdf_and_resolution():
+    calls, fake_call = _fake_coords_backend()
+    client = _client(fake_call)
+    result = await client.prepare_quickreport_at_coords(COORDS)
+
+    assert calls[0] == (
+        "terralogic_prepare_case_at_coords",
+        {"coordinates": COORDS},
+    )
+    assert result.cadastral_number == "50:23:0000000:120934"
+    assert result.pdf_bytes == PDF_BYTES
+    assert result.resolution is not None
+    assert result.resolution.source == "coordinates"
+    assert result.resolution.url == COORDS
+    assert result.resolution.title is None
+
+
+async def test_coords_incomplete_payload_is_unexpected_error():
+    async def fake_call(name, arguments):
+        return _envelope({"resolution": {}, "case": {}})
+
+    client = _client(fake_call)
+    with pytest.raises(UnexpectedError):
+        await client.prepare_quickreport_at_coords(COORDS)
+
+
 async def test_listing_resolution_failed_maps_to_dedicated_error():
     from terralogic_bot.errors import ListingResolutionFailed
 

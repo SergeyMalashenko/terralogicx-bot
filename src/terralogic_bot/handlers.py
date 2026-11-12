@@ -11,6 +11,7 @@ import asyncio
 import logging
 import uuid
 from time import monotonic
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -26,6 +27,7 @@ from aiogram.types import (
 from .cadastral import (
     extract_cadastral_number,
     parse_cadastral_number,
+    parse_coordinates,
     parse_listing_url,
 )
 from .client import TerraLogicClient
@@ -54,7 +56,8 @@ START_TEXT = (
     "• Рекомендации по дополнительным проверкам.\n\n"
     "🚀 Как получить отчёт:\n\n"
     "Отправьте кадастровый номер участка, например 50:29:0030502:979, "
-    "или ссылку на объявление Авито.\n\n"
+    "ссылку на объявление Авито или координаты участка с карты, "
+    "например 55.488626, 38.009447.\n\n"
     "Дождитесь завершения анализа.\n\n"
     "Получите PDF-отчёт с результатами.\n\n"
     "ℹ️ Важно: Анализ проводится на основе доступных данных и не является "
@@ -63,21 +66,36 @@ START_TEXT = (
 )
 
 HELP_TEXT = (
-    "Отправьте кадастровый номер текстовым сообщением или ссылку на "
-    "объявление Авито — я сформирую и пришлю экспресс-оценку участка в PDF.\n\n"
-    "Формат номера: 50:03:0070305:370\n\n"
+    "Отправьте кадастровый номер текстовым сообщением, ссылку на "
+    "объявление Авито или координаты участка с карты — я сформирую "
+    "и пришлю экспресс-оценку участка в PDF.\n\n"
+    "Формат номера: 50:03:0070305:370\n"
+    "Формат координат: 55.488626, 38.009447\n\n"
     "/support — связаться со службой поддержки."
 )
 
 INVALID_TEXT = (
-    "Не удалось распознать кадастровый номер или ссылку на объявление.\n\n"
+    "Не удалось распознать кадастровый номер, ссылку на объявление "
+    "или координаты.\n\n"
     "Отправьте номер, например:\n50:03:0070305:370\n\n"
-    "или ссылку на объявление Авито."
+    "ссылку на объявление Авито\n\n"
+    "или координаты:\n55.488626, 38.009447"
 )
 
 LISTING_ACCEPTED_TEXT = (
     "Принял ссылку на объявление.\n\n"
     "Определяю участок по метке на карте и формирую экспресс-оценку."
+)
+
+COORDS_ACCEPTED_TEXT = (
+    "Принял координаты.\n\n"
+    "Определяю участок по координатам и формирую экспресс-оценку."
+)
+
+COORDS_FAILED_TEXT = (
+    "Не удалось определить участок по координатам.\n\n"
+    "В этой точке нет зарегистрированного участка — проверьте "
+    "координаты или отправьте кадастровый номер, например 50:03:0070305:370."
 )
 
 LISTING_FAILED_TEXT = (
@@ -217,19 +235,10 @@ _RESOLUTION_WARNING_LABELS = (
 )
 
 
-def render_listing_failed_text(exc: ListingResolutionFailed) -> str:
-    """Текст отказа резолюции; с участками рядом, если движок их нашёл."""
-    if not exc.nearby:
-        return LISTING_FAILED_TEXT
-    lines = [
-        (
-            "Метка продавца в объявлении приблизительная: точка не попадает "
-            "в границы зарегистрированного участка."
-        ),
-        "",
-        "Участки рядом с меткой:",
-    ]
-    for item in exc.nearby:
+def _render_nearby_lines(nearby: list[dict[str, Any]]) -> list[str]:
+    """Строки «• КН · площадь · расстояние» для ближайших участков."""
+    lines = []
+    for item in nearby:
         cadastral_number = item.get("cadastral_number")
         if not cadastral_number:
             continue
@@ -241,15 +250,45 @@ def render_listing_failed_text(exc: ListingResolutionFailed) -> str:
         if isinstance(distance_m, (int, float)) and distance_m > 0:
             parts.append(f"≈{distance_m:g} м от метки")
         lines.append(" · ".join(parts))
-    lines.extend(
-        [
-            "",
-            (
-                "Если один из них — участок из объявления, отправьте его "
-                "кадастровый номер сообщением."
-            ),
-        ]
-    )
+    return lines
+
+
+def render_listing_failed_text(exc: ListingResolutionFailed) -> str:
+    """Текст отказа резолюции; с участками рядом, если движок их нашёл."""
+    if not exc.nearby:
+        return LISTING_FAILED_TEXT
+    lines = [
+        (
+            "Метка продавца в объявлении приблизительная: точка не попадает "
+            "в границы зарегистрированного участка."
+        ),
+        "",
+        "Участки рядом с меткой:",
+        *_render_nearby_lines(exc.nearby),
+        "",
+        (
+            "Если один из них — участок из объявления, отправьте его "
+            "кадастровый номер сообщением."
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def render_coords_failed_text(exc: ListingResolutionFailed) -> str:
+    """Текст отказа резолюции координат; с участками рядом, если найдены."""
+    if not exc.nearby:
+        return COORDS_FAILED_TEXT
+    lines = [
+        "В указанной точке нет зарегистрированного участка.",
+        "",
+        "Участки рядом с точкой:",
+        *_render_nearby_lines(exc.nearby),
+        "",
+        (
+            "Если один из них — нужный участок, отправьте его "
+            "кадастровый номер сообщением."
+        ),
+    ]
     return "\n".join(lines)
 
 
@@ -262,8 +301,12 @@ def render_resolution_warning(warning: str) -> str:
 
 
 def render_resolution_note(resolution: ListingResolution) -> str:
-    """Сообщение о найденном по объявлению участке + предупреждения."""
-    parts = [f"По объявлению найден участок {resolution.cadastral_number}."]
+    """Сообщение о найденном участке + предупреждения резолюции."""
+    if resolution.source == "coordinates":
+        header = f"По координатам найден участок {resolution.cadastral_number}."
+    else:
+        header = f"По объявлению найден участок {resolution.cadastral_number}."
+    parts = [header]
     if resolution.address:
         parts.append(resolution.address)
     if resolution.warnings:
@@ -328,19 +371,22 @@ async def _report_job(
     request_id: str,
     cadastral_number: str | None = None,
     listing_url: str | None = None,
+    coordinates: str | None = None,
 ) -> None:
     """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram.
 
-    Два входа: кадастровый номер либо ссылка на объявление (резолюция в КН
-    выполняется контуром engine на стороне сервера).
+    Три входа: кадастровый номер, ссылка на объявление либо координаты
+    (резолюция в КН выполняется контуром engine на стороне сервера).
     """
     started = monotonic()
     user_id = key[0]
-    label = cadastral_number or listing_url or "?"
+    label = cadastral_number or listing_url or coordinates or "?"
     try:
         async with semaphore:
             if listing_url is not None:
                 result = await client.prepare_quickreport_from_listing(listing_url)
+            elif coordinates is not None:
+                result = await client.prepare_quickreport_at_coords(coordinates)
             elif cadastral_number is not None:
                 result = await client.prepare_quickreport(cadastral_number)
             else:  # pragma: no cover - защищено диспетчеризацией handler'а
@@ -364,7 +410,10 @@ async def _report_job(
             monotonic() - started,
         )
     except ListingResolutionFailed as exc:
-        await message.answer(render_listing_failed_text(exc))
+        if coordinates is not None:
+            await message.answer(render_coords_failed_text(exc))
+        else:
+            await message.answer(render_listing_failed_text(exc))
         LOGGER.info(
             "%s listing resolution failed: user=%s input=%s error=%s",
             request_id, user_id, label, exc,
@@ -451,10 +500,11 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
         text = message.text or ""
         cadastral_number = parse_cadastral_number(text)
         listing_url = parse_listing_url(text)
+        coordinates = parse_coordinates(text)
         if cadastral_number is None and listing_url is not None:
             # «Номер + ссылка» в одном сообщении — явный номер важнее.
             cadastral_number = extract_cadastral_number(text)
-        if cadastral_number is None and listing_url is None:
+        if cadastral_number is None and listing_url is None and coordinates is None:
             await message.answer(INVALID_TEXT)
             return
         user_id = message.from_user.id if message.from_user else 0
@@ -481,8 +531,7 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
                     cadastral_number=cadastral_number,
                 )
             )
-        else:
-            assert listing_url is not None  # гарантировано веткой INVALID_TEXT
+        elif listing_url is not None:
             key = (user_id, listing_url)
             if key in jobs:
                 await message.answer(DUPLICATE_TEXT)
@@ -501,6 +550,28 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
                     key=key,
                     request_id=request_id,
                     listing_url=listing_url,
+                )
+            )
+        else:
+            assert coordinates is not None  # гарантировано веткой INVALID_TEXT
+            key = (user_id, coordinates)
+            if key in jobs:
+                await message.answer(DUPLICATE_TEXT)
+                return
+            LOGGER.info(
+                "%s accepted coords: user=%s coords=%s",
+                request_id, user_id, coordinates,
+            )
+            await message.answer(COORDS_ACCEPTED_TEXT)
+            task = asyncio.create_task(
+                _report_job(
+                    message=message,
+                    client=client,
+                    semaphore=semaphore,
+                    jobs=jobs,
+                    key=key,
+                    request_id=request_id,
+                    coordinates=coordinates,
                 )
             )
         jobs[key] = task

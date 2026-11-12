@@ -62,6 +62,10 @@ class TerraLogicClient(Protocol):
         self, url: str
     ) -> QuickReportResult: ...
 
+    async def prepare_quickreport_at_coords(
+        self, coordinates: str
+    ) -> QuickReportResult: ...
+
     async def get_collection_status(
         self, cadastral_number: str
     ) -> CollectionStatus: ...
@@ -148,6 +152,41 @@ class McpTerraLogicClient:
                 warnings=[
                     str(item) for item in resolution_data.get("warnings") or []
                 ],
+            ),
+        )
+
+    async def prepare_quickreport_at_coords(
+        self, coordinates: str
+    ) -> QuickReportResult:
+        """Use case по координатам: резолюция точки ЕГРН → сбор кейса → PDF."""
+        payload = await self._checked_call(
+            "terralogic_prepare_case_at_coords", {"coordinates": coordinates}
+        )
+        resolution_data = dict(payload.get("resolution") or {})
+        case = dict(payload.get("case") or {})
+        cadastral_number = str(resolution_data.get("cadastral_number") or "")
+        case_id = str(case.get("case_id") or "")
+        run_id = str(case.get("collection_run_id") or "")
+        if not cadastral_number or not case_id or not run_id:
+            raise UnexpectedError(
+                "prepare_case_at_coords вернул неполный результат"
+            )
+
+        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        return QuickReportResult(
+            cadastral_number=cadastral_number,
+            case_id=case_id,
+            collection_run_id=run_id,
+            pdf_bytes=pdf_bytes,
+            resolution=ListingResolution(
+                url=str(resolution_data.get("url") or coordinates),
+                cadastral_number=cadastral_number,
+                title=resolution_data.get("title"),
+                address=resolution_data.get("address"),
+                warnings=[
+                    str(item) for item in resolution_data.get("warnings") or []
+                ],
+                source="coordinates",
             ),
         )
 

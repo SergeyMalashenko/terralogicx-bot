@@ -13,6 +13,7 @@ class ListingResolution(BaseModel):
     title: str | None = None
     address: str | None = None
     warnings: list[str] = []
+    source: str = "avito"
 
 
 class QuickReportResult(BaseModel):

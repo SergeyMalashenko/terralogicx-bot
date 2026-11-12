@@ -53,3 +53,26 @@ def extract_cadastral_number(text: str) -> str | None:
         return None
     match = _CADASTRAL_NUMBER_RE.search(text)
     return match.group(0) if match else None
+
+
+_COORDS_RE = re.compile(r"(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)")
+
+
+def parse_coordinates(text: str) -> str | None:
+    """Координаты «55.488626, 38.009447» (копипаста Яндекс Карт) или None.
+
+    Формат копипасты Яндекс Карт: «широта, долгота» с десятичной точкой.
+    Десятичная запятая не поддерживается — она неотличима от разделителя.
+    Резолюция точки выполняется на сервере; здесь проверка формы и
+    диапазонов WGS84 для диспетчеризации сообщения.
+    """
+    if not text:
+        return None
+    match = _COORDS_RE.search(text)
+    if match is None:
+        return None
+    latitude = float(match.group(1))
+    longitude = float(match.group(2))
+    if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+        return None
+    return f"{match.group(1)}, {match.group(2)}"
