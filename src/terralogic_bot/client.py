@@ -227,6 +227,13 @@ class McpTerraLogicClient:
         message = str(error.get("message") or "unknown error")
         LOGGER.warning("TerraLogic tool %s отклонён: %s — %s", name, code, message)
         error_type = _ERROR_MAP.get(code, UnexpectedError)
+        if error_type is ListingResolutionFailed:
+            details = error.get("details")
+            nearby = details.get("nearby") if isinstance(details, dict) else None
+            raise ListingResolutionFailed(
+                message,
+                nearby=[item for item in nearby or [] if isinstance(item, dict)],
+            )
         raise error_type(message)
 
     async def _mcp_call_tool(

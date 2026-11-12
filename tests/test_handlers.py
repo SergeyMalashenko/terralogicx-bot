@@ -486,6 +486,32 @@ async def test_listing_resolution_failed_message(tmp_path):
     assert message.documents == []
 
 
+async def test_listing_resolution_failed_lists_nearby_parcels(tmp_path):
+    """При приблизительной метке бот показывает участки рядом с ней."""
+    client = FakeClient()
+    client.listing_error = ListingResolutionFailed(
+        "no_landplots_at_coordinates",
+        nearby=[
+            {
+                "cadastral_number": "50:13:0020304:162",
+                "distance_m": 100.0,
+                "area_m2": 485.0,
+            },
+            {"cadastral_number": "50:13:0020303:260", "distance_m": 100.0},
+        ],
+    )
+    router = build_router(client, _settings(tmp_path))
+    message = FakeMessage(LISTING_URL)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.answers) == 2)
+    answer = message.answers[-1]
+    assert "приблизительная" in answer
+    assert "50:13:0020304:162" in answer
+    assert "4.85 сот." in answer
+    assert "50:13:0020303:260" in answer
+    assert message.documents == []
+
+
 async def test_cadastral_number_preferred_over_listing_url(tmp_path):
     """Номер и ссылка в одном сообщении — обрабатываем явный номер."""
     client = FakeClient()

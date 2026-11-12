@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class BotError(Exception):
     """Базовая ожидаемая ошибка сценария бота."""
@@ -21,6 +23,16 @@ class ParcelNotFound(BotError):
 
 class ListingResolutionFailed(BotError):
     """Не удалось определить кадастровый номер по ссылке на объявление."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        nearby: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(message)
+        # Участки ЕГРН рядом с меткой продавца (если движок их нашёл).
+        self.nearby = nearby or []
 
 
 class CaseNotCollected(BotError):

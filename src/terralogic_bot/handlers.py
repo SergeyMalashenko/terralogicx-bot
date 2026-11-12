@@ -217,6 +217,42 @@ _RESOLUTION_WARNING_LABELS = (
 )
 
 
+def render_listing_failed_text(exc: ListingResolutionFailed) -> str:
+    """Текст отказа резолюции; с участками рядом, если движок их нашёл."""
+    if not exc.nearby:
+        return LISTING_FAILED_TEXT
+    lines = [
+        (
+            "Метка продавца в объявлении приблизительная: точка не попадает "
+            "в границы зарегистрированного участка."
+        ),
+        "",
+        "Участки рядом с меткой:",
+    ]
+    for item in exc.nearby:
+        cadastral_number = item.get("cadastral_number")
+        if not cadastral_number:
+            continue
+        parts = [f"• {cadastral_number}"]
+        area_m2 = item.get("area_m2")
+        if isinstance(area_m2, (int, float)) and area_m2 > 0:
+            parts.append(f"{area_m2 / 100:g} сот.")
+        distance_m = item.get("distance_m")
+        if isinstance(distance_m, (int, float)) and distance_m > 0:
+            parts.append(f"≈{distance_m:g} м от метки")
+        lines.append(" · ".join(parts))
+    lines.extend(
+        [
+            "",
+            (
+                "Если один из них — участок из объявления, отправьте его "
+                "кадастровый номер сообщением."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_resolution_warning(warning: str) -> str:
     """Статический русский текст предупреждения резолюции (без LLM)."""
     for prefix, label in _RESOLUTION_WARNING_LABELS:
@@ -328,7 +364,7 @@ async def _report_job(
             monotonic() - started,
         )
     except ListingResolutionFailed as exc:
-        await message.answer(LISTING_FAILED_TEXT)
+        await message.answer(render_listing_failed_text(exc))
         LOGGER.info(
             "%s listing resolution failed: user=%s input=%s error=%s",
             request_id, user_id, label, exc,

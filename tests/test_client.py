@@ -26,11 +26,16 @@ def _envelope(data: dict) -> dict:
     return {"ok": True, "data": data}
 
 
-def _error(code: str, message: str = "boom", retryable: bool = False) -> dict:
-    return {
-        "ok": False,
-        "error": {"code": code, "message": message, "retryable": retryable},
-    }
+def _error(
+    code: str,
+    message: str = "boom",
+    retryable: bool = False,
+    details: dict | None = None,
+) -> dict:
+    error: dict = {"code": code, "message": message, "retryable": retryable}
+    if details is not None:
+        error["details"] = details
+    return {"ok": False, "error": error}
 
 
 def _client(call_tool) -> McpTerraLogicClient:
@@ -294,6 +299,31 @@ async def test_listing_resolution_failed_maps_to_dedicated_error():
     client = _client(fake_call)
     with pytest.raises(ListingResolutionFailed, match="no_landplots"):
         await client.prepare_quickreport_from_listing(LISTING_URL)
+
+
+async def test_listing_resolution_failed_carries_nearby_details():
+    from terralogic_bot.errors import ListingResolutionFailed
+
+    nearby = [
+        {
+            "cadastral_number": "50:13:0020304:162",
+            "distance_m": 100.0,
+            "area_m2": 485.0,
+        },
+        {"cadastral_number": "50:13:0020303:260", "distance_m": 100.0},
+    ]
+
+    async def fake_call(name, arguments):
+        return _error(
+            "listing_resolution_failed",
+            "no cadastral candidates returned",
+            details={"nearby": nearby},
+        )
+
+    client = _client(fake_call)
+    with pytest.raises(ListingResolutionFailed) as excinfo:
+        await client.prepare_quickreport_from_listing(LISTING_URL)
+    assert excinfo.value.nearby == nearby
 
 
 async def test_listing_incomplete_payload_is_unexpected_error():
