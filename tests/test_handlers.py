@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from terralogic_bot.config import Settings
@@ -37,6 +38,7 @@ from terralogic_bot.models import (
     QuickReportResult,
     SourceStatus,
 )
+from terralogic_bot.quota import QuotaStore
 
 KN = "50:21:0030210:123"
 LISTING_URL = (
@@ -615,3 +617,71 @@ async def test_listing_duplicate_active_request_rejected(tmp_path):
     assert second.answers == [DUPLICATE_TEXT]
     client.gate.set()
     await _wait_for(lambda: len(first.documents) == 1)
+
+
+async def test_report_limit_blocks_request(tmp_path):
+    """Лимит исчерпан: задача не запускается, backend не вызывается."""
+    quota = QuotaStore(":memory:")
+    for _ in range(5):
+        quota.record(42)
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    assert len(message.answers) == 1
+    assert "все бесплатные отчёты" in message.answers[0]
+    assert "(5 шт.)" in message.answers[0]
+    assert client.calls == []
+    assert message.documents == []
+
+
+async def test_successful_report_consumes_quota(tmp_path):
+    """Успешно доставленный PDF списывает один отчёт из квоты."""
+    quota = QuotaStore(":memory:")
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert quota.used(42) == 1
+    assert quota.remaining(42, 5) == 4
+
+
+async def test_failed_report_does_not_consume_quota(tmp_path):
+    """Ошибка сбора квоту не тратит."""
+    quota = QuotaStore(":memory:")
+    client = FakeClient()
+    client.error = ParcelNotFound("нет такого")
+    router = build_router(client, _settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.answers) == 2)
+    assert quota.used(42) == 0
+
+
+async def test_unlimited_user_bypasses_quota(tmp_path):
+    """Пользователь из UNLIMITED_USER_IDS не ограничен."""
+    quota = QuotaStore(":memory:")
+    for _ in range(10):
+        quota.record(42)
+    client = FakeClient()
+    settings = replace(_settings(tmp_path), unlimited_user_ids=frozenset({42}))
+    router = build_router(client, settings, quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert len(client.calls) == 1
+
+
+async def test_quota_is_checked_before_duplicate_guard(tmp_path):
+    """Исчерпанный лимит отвечает одинаково и для повторного номера."""
+    quota = QuotaStore(":memory:")
+    for _ in range(5):
+        quota.record(42)
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path), quota)
+    for _ in range(2):
+        message = FakeMessage(KN)
+        await _handler(router, "cadastral")(message)
+        assert len(message.answers) == 1
+        assert "все бесплатные отчёты" in message.answers[0]

@@ -41,6 +41,7 @@ from .errors import (
     TerraLogicUnavailable,
 )
 from .models import CollectionStatus, ListingResolution
+from .quota import QuotaStore
 from .support import support_start_button
 
 LOGGER = logging.getLogger("terralogic_bot")
@@ -96,6 +97,12 @@ COORDS_FAILED_TEXT = (
     "Не удалось определить участок по координатам.\n\n"
     "В этой точке нет зарегистрированного участка — проверьте "
     "координаты или отправьте кадастровый номер, например 50:03:0070305:370."
+)
+
+LIMIT_REACHED_TEXT = (
+    "Вы использовали все бесплатные отчёты ({limit} шт.).\n\n"
+    "Чтобы продолжить пользоваться сервисом, напишите в поддержку — "
+    "обсудим условия."
 )
 
 LISTING_FAILED_TEXT = (
@@ -372,11 +379,13 @@ async def _report_job(
     cadastral_number: str | None = None,
     listing_url: str | None = None,
     coordinates: str | None = None,
+    quota: QuotaStore | None = None,
 ) -> None:
     """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram.
 
     Три входа: кадастровый номер, ссылка на объявление либо координаты
     (резолюция в КН выполняется контуром engine на стороне сервера).
+    Квота списывается только за успешно доставленный PDF.
     """
     started = monotonic()
     user_id = key[0]
@@ -400,6 +409,9 @@ async def _report_job(
             caption=f"Экспресс-оценка участка\n{resolved}",
             reply_markup=feedback_keyboard(resolved),
         )
+        if quota is not None:
+            used = quota.record(user_id)
+            LOGGER.info("%s quota: user=%s used=%s", request_id, user_id, used)
         LOGGER.info(
             "%s done: user=%s kn=%s case=%s run=%s %.1fs",
             request_id,
@@ -442,8 +454,14 @@ async def _report_job(
         jobs.pop(key, None)
 
 
-def build_router(client: TerraLogicClient, settings: Settings) -> Router:
+def build_router(
+    client: TerraLogicClient,
+    settings: Settings,
+    quota: QuotaStore | None = None,
+) -> Router:
     """Router с замкнутыми зависимостями: client, лимиты, active jobs."""
+    if quota is None:
+        quota = QuotaStore(":memory:")
     router = Router(name="terralogicx-bot")
     semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
     jobs: dict[tuple[int, str], asyncio.Task] = {}
@@ -509,6 +527,17 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
             return
         user_id = message.from_user.id if message.from_user else 0
         request_id = uuid.uuid4().hex[:8]
+        if user_id not in settings.unlimited_user_ids and (
+            quota.remaining(user_id, settings.report_limit) <= 0
+        ):
+            LOGGER.info("%s limit reached: user=%s", request_id, user_id)
+            await message.answer(
+                LIMIT_REACHED_TEXT.format(limit=settings.report_limit),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[support_start_button()]]
+                ),
+            )
+            return
         if cadastral_number is not None:
             key = (user_id, cadastral_number)
             if key in jobs:
@@ -529,6 +558,7 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
                     key=key,
                     request_id=request_id,
                     cadastral_number=cadastral_number,
+                    quota=quota,
                 )
             )
         elif listing_url is not None:
@@ -550,6 +580,7 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
                     key=key,
                     request_id=request_id,
                     listing_url=listing_url,
+                    quota=quota,
                 )
             )
         else:
@@ -572,6 +603,7 @@ def build_router(client: TerraLogicClient, settings: Settings) -> Router:
                     key=key,
                     request_id=request_id,
                     coordinates=coordinates,
+                    quota=quota,
                 )
             )
         jobs[key] = task

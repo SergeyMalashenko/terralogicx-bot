@@ -17,6 +17,9 @@ class Settings:
     support_group_id: int | None = None
     support_session_ttl_s: float = 3600.0
     support_db_path: str = "data/support.sqlite3"
+    report_limit: int = 5
+    unlimited_user_ids: frozenset[int] = frozenset()
+    quota_db_path: str = "data/quota.sqlite3"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -40,6 +43,18 @@ class Settings:
                     "SUPPORT_GROUP_ID должен быть целым числом "
                     "(id группы, например -1001234567890)"
                 ) from exc
+        unlimited_user_ids: set[int] = set()
+        raw_unlimited = (source.get("UNLIMITED_USER_IDS") or "").strip()
+        if raw_unlimited:
+            try:
+                unlimited_user_ids = {
+                    int(item) for item in raw_unlimited.split(",") if item.strip()
+                }
+            except ValueError as exc:
+                raise RuntimeError(
+                    "UNLIMITED_USER_IDS должен быть списком id через запятую, "
+                    "например 123456789,987654321"
+                ) from exc
         return cls(
             telegram_bot_token=token,
             terralogic_mcp_url=source.get(
@@ -58,4 +73,7 @@ class Settings:
             support_db_path=source.get(
                 "SUPPORT_DB_PATH", "data/support.sqlite3"
             ),
+            report_limit=int(source.get("REPORT_LIMIT", "5")),
+            unlimited_user_ids=frozenset(unlimited_user_ids),
+            quota_db_path=source.get("QUOTA_DB_PATH", "data/quota.sqlite3"),
         )

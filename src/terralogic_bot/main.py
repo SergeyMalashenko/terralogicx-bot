@@ -8,6 +8,7 @@ import logging
 from .client import McpTerraLogicClient
 from .config import Settings
 from .handlers import build_router
+from .quota import QuotaStore
 from .support import SupportStore, build_support_router, support_sweeper
 
 
@@ -25,10 +26,11 @@ async def _run(settings: Settings) -> None:
         read_timeout_s=settings.request_timeout_s,
     )
     support_store = SupportStore(settings.support_db_path)
+    quota_store = QuotaStore(settings.quota_db_path)
     dispatcher = Dispatcher()
     # поддержка первой: перехватывает сообщения активных сессий и группы
     dispatcher.include_router(build_support_router(settings, support_store))
-    dispatcher.include_router(build_router(client, settings))
+    dispatcher.include_router(build_router(client, settings, quota_store))
     bot = Bot(settings.telegram_bot_token, session=session)
     sweeper = asyncio.create_task(
         support_sweeper(bot, support_store, settings.support_session_ttl_s)
@@ -38,6 +40,7 @@ async def _run(settings: Settings) -> None:
     finally:
         sweeper.cancel()
         support_store.close()
+        quota_store.close()
 
 
 def main() -> None:
