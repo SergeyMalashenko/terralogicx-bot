@@ -6,6 +6,9 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import SendMessage
+
 from terralogic_bot.config import Settings
 from terralogic_bot.errors import (
     CaseNotCollected,
@@ -75,6 +78,23 @@ class FakeMessage:
     async def edit_reply_markup(self, reply_markup: object = None) -> None:
         if reply_markup is None:
             self.markup_removed = True
+
+
+class FlakyAckMessage(FakeMessage):
+    """Первый answer (ack) падает сетевой ошибкой — как при сбое до Telegram."""
+
+    def __init__(self, text: str | None, user_id: int = 42) -> None:
+        super().__init__(text, user_id)
+        self._ack_failed = False
+
+    async def answer(self, text: str, **kwargs: object) -> None:
+        if not self._ack_failed:
+            self._ack_failed = True
+            raise TelegramNetworkError(
+                method=SendMessage(chat_id=self.from_user.id, text=text),
+                message="ClientConnectorError: Connection reset by peer",
+            )
+        await super().answer(text, **kwargs)
 
 
 class FakeCallbackQuery:
@@ -493,6 +513,36 @@ async def test_listing_url_accepted_and_report_delivered(tmp_path):
     document, caption = message.documents[0]
     assert document.filename == "TerraLogicX_50-28-0040126-62.pdf"
     assert caption == "Экспресс-оценка участка\n50:28:0040126:62"
+
+
+async def test_listing_ack_failure_does_not_kill_report_job(tmp_path):
+    """Сбой отправки ack (сеть до Telegram) не отменяет формирование отчёта."""
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FlakyAckMessage(LISTING_URL)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+
+    assert client.listing_calls == [LISTING_URL]
+    assert LISTING_ACCEPTED_TEXT not in message.answers
+    resolution_note = message.answers[0]
+    assert "50:28:0040126:62" in resolution_note
+    document, caption = message.documents[0]
+    assert document.filename == "TerraLogicX_50-28-0040126-62.pdf"
+    assert caption == "Экспресс-оценка участка\n50:28:0040126:62"
+
+
+async def test_cadastral_ack_failure_does_not_kill_report_job(tmp_path):
+    client = FakeClient()
+    router = build_router(client, _settings(tmp_path))
+    message = FlakyAckMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+
+    assert client.calls == [KN]
+    document, caption = message.documents[0]
+    assert document.filename == "TerraLogicX_50-21-0030210-123.pdf"
+    assert caption == f"Экспресс-оценка участка\n{KN}"
 
 
 async def test_listing_url_inside_text(tmp_path):

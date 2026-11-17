@@ -454,6 +454,23 @@ async def _report_job(
         jobs.pop(key, None)
 
 
+async def _send_ack(
+    message: Message,
+    text: str,
+    *,
+    request_id: str,
+    user_id: int,
+    label: str,
+) -> None:
+    """Ack-подтверждение запроса: сбой отправки не должен убивать job."""
+    try:
+        await message.answer(text)
+    except TelegramAPIError:
+        LOGGER.warning(
+            "%s ack send failed: user=%s input=%s", request_id, user_id, label
+        )
+
+
 def build_router(
     client: TerraLogicClient,
     settings: Settings,
@@ -546,8 +563,12 @@ def build_router(
             LOGGER.info(
                 "%s accepted: user=%s kn=%s", request_id, user_id, cadastral_number
             )
-            await message.answer(
-                f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку."
+            await _send_ack(
+                message,
+                f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку.",
+                request_id=request_id,
+                user_id=user_id,
+                label=cadastral_number,
             )
             task = asyncio.create_task(
                 _report_job(
@@ -570,7 +591,13 @@ def build_router(
                 "%s accepted listing: user=%s url=%s",
                 request_id, user_id, listing_url,
             )
-            await message.answer(LISTING_ACCEPTED_TEXT)
+            await _send_ack(
+                message,
+                LISTING_ACCEPTED_TEXT,
+                request_id=request_id,
+                user_id=user_id,
+                label=listing_url,
+            )
             task = asyncio.create_task(
                 _report_job(
                     message=message,
@@ -593,7 +620,13 @@ def build_router(
                 "%s accepted coords: user=%s coords=%s",
                 request_id, user_id, coordinates,
             )
-            await message.answer(COORDS_ACCEPTED_TEXT)
+            await _send_ack(
+                message,
+                COORDS_ACCEPTED_TEXT,
+                request_id=request_id,
+                user_id=user_id,
+                label=coordinates,
+            )
             task = asyncio.create_task(
                 _report_job(
                     message=message,
