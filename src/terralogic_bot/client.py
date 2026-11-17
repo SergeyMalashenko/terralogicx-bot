@@ -7,6 +7,8 @@ get_collection_status (сводка сбора) и submit_feedback (оценка
 terralogic_prepare_case, terralogic_prepare_case_from_listing,
 terralogic_prepare_quickreport, terralogic_get_report_pdf,
 terralogic_submit_feedback.
+Долгие операции транслируют MCP progress-уведомления engine наружу
+единым коллбэком процентов (0–100) — без имён внутренних сервисов.
 Бот не импортирует internals terralogic-engine и не знает об LLM-контуре.
 """
 
@@ -39,7 +41,34 @@ from .models import (
 
 LOGGER = logging.getLogger(__name__)
 
-CallToolFn = Callable[[str, Mapping[str, Any]], Awaitable[dict[str, Any]]]
+ProgressCallback = Callable[[float], None]
+"""Проценты глобального прогресса операции (0–100), без служебных меток."""
+
+_McpProgressFn = Callable[[float, "float | None", "str | None"], Awaitable[None]]
+CallToolFn = Callable[
+    [str, Mapping[str, Any], "_McpProgressFn | None"],
+    Awaitable[dict[str, Any]],
+]
+
+
+def _scale_progress(
+    callback: ProgressCallback | None,
+    lo: float,
+    hi: float,
+) -> _McpProgressFn | None:
+    """MCP progress-уведомления инструмента → доля глобальной шкалы бота."""
+
+    if callback is None:
+        return None
+
+    async def _progress(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        callback(lo + (hi - lo) * progress / 100.0)
+
+    return _progress
 
 _ERROR_MAP = {
     "invalid_request": InvalidCadastralNumber,
@@ -55,15 +84,24 @@ class TerraLogicClient(Protocol):
     """Граница приложения: handlers зависят только от этого интерфейса."""
 
     async def prepare_quickreport(
-        self, cadastral_number: str
+        self,
+        cadastral_number: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> QuickReportResult: ...
 
     async def prepare_quickreport_from_listing(
-        self, url: str
+        self,
+        url: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> QuickReportResult: ...
 
     async def prepare_quickreport_at_coords(
-        self, coordinates: str
+        self,
+        coordinates: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> QuickReportResult: ...
 
     async def get_collection_status(
@@ -103,17 +141,26 @@ class McpTerraLogicClient:
         self._read_timeout_s = read_timeout_s
         self._call_tool_impl = call_tool or self._mcp_call_tool
 
-    async def prepare_quickreport(self, cadastral_number: str) -> QuickReportResult:
+    async def prepare_quickreport(
+        self,
+        cadastral_number: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> QuickReportResult:
         """Существующий use case TerraLogicX: сбор кейса → QuickReport → PDF."""
         case = await self._checked_call(
-            "terralogic_prepare_case", {"cadastral_number": cadastral_number}
+            "terralogic_prepare_case",
+            {"cadastral_number": cadastral_number},
+            progress_callback=_scale_progress(progress_callback, 0.0, 80.0),
         )
         case_id = str(case.get("case_id") or "")
         run_id = str(case.get("collection_run_id") or "")
         if not case_id or not run_id:
             raise UnexpectedError("prepare_case вернул неполный результат")
 
-        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        pdf_bytes = await self._fetch_quickreport_pdf(
+            case_id, run_id, progress_callback=progress_callback
+        )
         return QuickReportResult(
             cadastral_number=cadastral_number,
             case_id=case_id,
@@ -122,11 +169,16 @@ class McpTerraLogicClient:
         )
 
     async def prepare_quickreport_from_listing(
-        self, url: str
+        self,
+        url: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> QuickReportResult:
         """Use case по ссылке на объявление: резолюция → сбор кейса → PDF."""
         payload = await self._checked_call(
-            "terralogic_prepare_case_from_listing", {"url": url}
+            "terralogic_prepare_case_from_listing",
+            {"url": url},
+            progress_callback=_scale_progress(progress_callback, 0.0, 80.0),
         )
         resolution_data = dict(payload.get("resolution") or {})
         case = dict(payload.get("case") or {})
@@ -138,7 +190,9 @@ class McpTerraLogicClient:
                 "prepare_case_from_listing вернул неполный результат"
             )
 
-        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        pdf_bytes = await self._fetch_quickreport_pdf(
+            case_id, run_id, progress_callback=progress_callback
+        )
         return QuickReportResult(
             cadastral_number=cadastral_number,
             case_id=case_id,
@@ -156,11 +210,16 @@ class McpTerraLogicClient:
         )
 
     async def prepare_quickreport_at_coords(
-        self, coordinates: str
+        self,
+        coordinates: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> QuickReportResult:
         """Use case по координатам: резолюция точки ЕГРН → сбор кейса → PDF."""
         payload = await self._checked_call(
-            "terralogic_prepare_case_at_coords", {"coordinates": coordinates}
+            "terralogic_prepare_case_at_coords",
+            {"coordinates": coordinates},
+            progress_callback=_scale_progress(progress_callback, 0.0, 80.0),
         )
         resolution_data = dict(payload.get("resolution") or {})
         case = dict(payload.get("case") or {})
@@ -172,7 +231,9 @@ class McpTerraLogicClient:
                 "prepare_case_at_coords вернул неполный результат"
             )
 
-        pdf_bytes = await self._fetch_quickreport_pdf(case_id, run_id)
+        pdf_bytes = await self._fetch_quickreport_pdf(
+            case_id, run_id, progress_callback=progress_callback
+        )
         return QuickReportResult(
             cadastral_number=cadastral_number,
             case_id=case_id,
@@ -190,15 +251,23 @@ class McpTerraLogicClient:
             ),
         )
 
-    async def _fetch_quickreport_pdf(self, case_id: str, run_id: str) -> bytes:
+    async def _fetch_quickreport_pdf(
+        self,
+        case_id: str,
+        run_id: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> bytes:
         """QuickReport + PDF для готового кейса (общий хвост use case)."""
         await self._checked_call(
             "terralogic_prepare_quickreport",
             {"case_id": case_id, "collection_run_id": run_id},
+            progress_callback=_scale_progress(progress_callback, 80.0, 95.0),
         )
         pdf = await self._checked_call(
             "terralogic_get_report_pdf",
             {"case_id": case_id, "collection_run_id": run_id},
+            progress_callback=_scale_progress(progress_callback, 95.0, 100.0),
         )
         content = pdf.get("content_base64")
         if not content:
@@ -248,11 +317,17 @@ class McpTerraLogicClient:
         await self._checked_call("terralogic_submit_feedback", arguments)
 
     async def _checked_call(
-        self, name: str, arguments: Mapping[str, Any]
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        progress_callback: _McpProgressFn | None = None,
     ) -> dict[str, Any]:
         """Вызов инструмента с маппингом конверта ToolResult на ошибки бота."""
         try:
-            envelope = await self._call_tool_impl(name, arguments)
+            envelope = await self._call_tool_impl(
+                name, arguments, progress_callback
+            )
         except TimeoutError as exc:
             raise TerraLogicUnavailable(f"таймаут вызова {name}") from exc
         except TerraLogicUnavailable:
@@ -276,7 +351,10 @@ class McpTerraLogicClient:
         raise error_type(message)
 
     async def _mcp_call_tool(
-        self, name: str, arguments: Mapping[str, Any]
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        progress_callback: _McpProgressFn | None = None,
     ) -> dict[str, Any]:
         """Реальный вызов MCP: session per call, structuredContent конверта."""
         import httpx
@@ -295,7 +373,9 @@ class McpTerraLogicClient:
                 ) as session,
             ):
                 await session.initialize()
-                result = await session.call_tool(name, dict(arguments))
+                result = await session.call_tool(
+                    name, dict(arguments), progress_callback=progress_callback
+                )
         except BaseExceptionGroup as exc:
             # anyio TaskGroup транспорта заворачивает сетевые сбои — расплющиваем
             leaves = "; ".join(str(leaf) for leaf in _group_leaves(exc))

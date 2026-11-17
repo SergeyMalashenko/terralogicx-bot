@@ -31,7 +31,9 @@ from terralogic_bot.handlers import (
     START_TEXT,
     STATUS_USAGE_TEXT,
     UNAVAILABLE_TEXT,
+    _report_job,
     build_router,
+    render_progress,
     report_filename,
 )
 from terralogic_bot.models import (
@@ -55,6 +57,22 @@ class _FakeUser:
         self.id = user_id
 
 
+class FakeSentMessage:
+    """Отправленное сообщение: история правок и факт удаления."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.edits: list[str] = []
+        self.deleted = False
+
+    async def edit_text(self, text: str, **kwargs: object) -> None:
+        self.edits.append(text)
+        self.text = text
+
+    async def delete(self) -> None:
+        self.deleted = True
+
+
 class FakeMessage:
     """Минимальный контракт aiogram Message, используемый handlers."""
 
@@ -62,12 +80,20 @@ class FakeMessage:
         self.text = text
         self.from_user = _FakeUser(user_id)
         self.answers: list[str] = []
+        # Статус прогресса («⏳ …») хранится отдельно, чтобы не смешивать
+        # служебные правки с содержательными ответами бота.
+        self.status_messages: list[FakeSentMessage] = []
         self.documents: list[tuple[object, str | None]] = []
         self.document_kwargs: list[dict] = []
         self.markup_removed = False
 
-    async def answer(self, text: str, **kwargs: object) -> None:
-        self.answers.append(text)
+    async def answer(self, text: str, **kwargs: object) -> FakeSentMessage:
+        sent = FakeSentMessage(text)
+        if text.startswith("⏳"):
+            self.status_messages.append(sent)
+        else:
+            self.answers.append(text)
+        return sent
 
     async def answer_document(
         self, document: object, caption: str | None = None, **kwargs: object
@@ -131,7 +157,9 @@ class FakeClient:
         self.feedback_calls: list[tuple[str, str, int | None]] = []
         self.feedback_error: Exception | None = None
 
-    async def prepare_quickreport(self, cadastral_number: str) -> QuickReportResult:
+    async def prepare_quickreport(
+        self, cadastral_number: str, *, progress_callback=None
+    ) -> QuickReportResult:
         self.calls.append(cadastral_number)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -141,6 +169,9 @@ class FakeClient:
             await asyncio.sleep(0.01)
             if self.error is not None:
                 raise self.error
+            if progress_callback is not None:
+                for percent in (5.0, 40.0, 80.0, 100.0):
+                    progress_callback(percent)
             return QuickReportResult(
                 cadastral_number=cadastral_number,
                 case_id="case-50-21-0030210-123",
@@ -150,7 +181,9 @@ class FakeClient:
         finally:
             self.active -= 1
 
-    async def prepare_quickreport_from_listing(self, url: str) -> QuickReportResult:
+    async def prepare_quickreport_from_listing(
+        self, url: str, *, progress_callback=None
+    ) -> QuickReportResult:
         self.listing_calls.append(url)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -160,6 +193,9 @@ class FakeClient:
             await asyncio.sleep(0.01)
             if self.listing_error is not None:
                 raise self.listing_error
+            if progress_callback is not None:
+                for percent in (3.0, 15.0, 60.0, 100.0):
+                    progress_callback(percent)
             return QuickReportResult(
                 cadastral_number="50:28:0040126:62",
                 case_id="case-50-28-0040126-62",
@@ -179,7 +215,9 @@ class FakeClient:
         finally:
             self.active -= 1
 
-    async def prepare_quickreport_at_coords(self, coordinates: str) -> QuickReportResult:
+    async def prepare_quickreport_at_coords(
+        self, coordinates: str, *, progress_callback=None
+    ) -> QuickReportResult:
         self.coords_calls.append(coordinates)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -189,6 +227,9 @@ class FakeClient:
             await asyncio.sleep(0.01)
             if self.coords_error is not None:
                 raise self.coords_error
+            if progress_callback is not None:
+                for percent in (3.0, 15.0, 60.0, 100.0):
+                    progress_callback(percent)
             return QuickReportResult(
                 cadastral_number="50:23:0000000:120934",
                 case_id="case-50-23-0000000-120934",
@@ -735,3 +776,112 @@ async def test_quota_is_checked_before_duplicate_guard(tmp_path):
         await _handler(router, "cadastral")(message)
         assert len(message.answers) == 1
         assert "все бесплатные отчёты" in message.answers[0]
+
+
+# --- прогресс запроса: статусное сообщение, тикер, очистка ---
+
+
+def test_render_progress_shows_only_bar_and_digits():
+    text = render_progress(38.4)
+    assert "38%" in text
+    assert "▓" in text and "░" in text
+    # Никаких имён внутренних сервисов и этапов — только цифры.
+    for marker in ("НСПД", "OSM", "РГИС", "geodocs", "этап"):
+        assert marker not in text
+    assert render_progress(0.0).endswith("0%")
+    assert render_progress(100.0).endswith("100%")
+    assert "▓" not in render_progress(0.0).splitlines()[-1]
+
+
+class _SlowProgressClient:
+    """Клиент с паузами между событиями — тикер успевает отрисоваться."""
+
+    def __init__(self, percents: tuple[float, ...] = (10.0, 55.0, 100.0)) -> None:
+        self._percents = percents
+
+    async def prepare_quickreport(
+        self, cadastral_number: str, *, progress_callback=None
+    ) -> QuickReportResult:
+        for percent in self._percents:
+            if progress_callback is not None:
+                progress_callback(percent)
+            await asyncio.sleep(0.02)
+        return QuickReportResult(
+            cadastral_number=cadastral_number,
+            case_id="case-50-21-0030210-123",
+            collection_run_id="run-1",
+            pdf_bytes=PDF_BYTES,
+        )
+
+
+async def test_progress_status_edited_monotonically_and_removed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("terralogic_bot.handlers._PROGRESS_TICK_S", 0.005)
+    message = FakeMessage(KN)
+    await _report_job(
+        message=message,
+        client=_SlowProgressClient(),
+        semaphore=asyncio.Semaphore(1),
+        jobs={},
+        key=(42, KN),
+        request_id="progres1",
+        cadastral_number=KN,
+    )
+
+    assert len(message.status_messages) == 1
+    status = message.status_messages[0]
+    assert status.deleted is True
+    assert status.edits, "тикер не успел отрисовать ни одного процента"
+    rendered = [int(edit.rsplit(" ", 1)[-1].rstrip("%")) for edit in status.edits]
+    assert rendered == sorted(rendered)
+    assert rendered[-1] == 100
+    assert len(message.documents) == 1
+
+
+async def test_progress_status_removed_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("terralogic_bot.handlers._PROGRESS_TICK_S", 0.005)
+    client = FakeClient()
+    client.error = TerraLogicUnavailable("backend down")
+    message = FakeMessage(KN)
+    await _report_job(
+        message=message,
+        client=client,
+        semaphore=asyncio.Semaphore(1),
+        jobs={},
+        key=(42, KN),
+        request_id="progres2",
+        cadastral_number=KN,
+    )
+
+    assert message.answers[-1] == UNAVAILABLE_TEXT
+    assert len(message.status_messages) == 1
+    assert message.status_messages[0].deleted is True
+
+
+async def test_progress_status_survives_send_failure(tmp_path, monkeypatch):
+    """Сбой отправки статуса (как у ack) не мешает доставке отчёта."""
+    monkeypatch.setattr("terralogic_bot.handlers._PROGRESS_TICK_S", 0.005)
+
+    class _NoStatusMessage(FakeMessage):
+        async def answer(self, text: str, **kwargs: object):
+            if text.startswith("⏳"):
+                raise TelegramNetworkError(
+                    method=SendMessage(chat_id=self.from_user.id, text=text),
+                    message="ClientConnectorError: Connection reset by peer",
+                )
+            return await super().answer(text, **kwargs)
+
+    message = _NoStatusMessage(KN)
+    await _report_job(
+        message=message,
+        client=_SlowProgressClient(),
+        semaphore=asyncio.Semaphore(1),
+        jobs={},
+        key=(42, KN),
+        request_id="progres3",
+        cadastral_number=KN,
+    )
+
+    assert message.status_messages == []
+    assert len(message.documents) == 1

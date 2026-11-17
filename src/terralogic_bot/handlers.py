@@ -390,14 +390,44 @@ async def _report_job(
     started = monotonic()
     user_id = key[0]
     label = cadastral_number or listing_url or coordinates or "?"
+    latest = {"percent": 0.0}
+
+    def _on_progress(percent: float) -> None:
+        latest["percent"] = max(latest["percent"], percent)
+
+    status_message: Message | None = None
+    try:
+        status_message = await message.answer(render_progress(0.0))
+    except TelegramAPIError:
+        LOGGER.debug("%s progress status send failed", request_id)
+
+    async def _ticker() -> None:
+        rendered = -1
+        while True:
+            await asyncio.sleep(_PROGRESS_TICK_S)
+            current = int(latest["percent"])
+            if status_message is not None and current != rendered:
+                rendered = current
+                try:
+                    await status_message.edit_text(render_progress(current))
+                except TelegramAPIError:
+                    pass
+
+    ticker = asyncio.create_task(_ticker())
     try:
         async with semaphore:
             if listing_url is not None:
-                result = await client.prepare_quickreport_from_listing(listing_url)
+                result = await client.prepare_quickreport_from_listing(
+                    listing_url, progress_callback=_on_progress
+                )
             elif coordinates is not None:
-                result = await client.prepare_quickreport_at_coords(coordinates)
+                result = await client.prepare_quickreport_at_coords(
+                    coordinates, progress_callback=_on_progress
+                )
             elif cadastral_number is not None:
-                result = await client.prepare_quickreport(cadastral_number)
+                result = await client.prepare_quickreport(
+                    cadastral_number, progress_callback=_on_progress
+                )
             else:  # pragma: no cover - защищено диспетчеризацией handler'а
                 raise BotError("report job без входных данных")
         resolved = result.cadastral_number
@@ -451,6 +481,16 @@ async def _report_job(
             "%s unexpected: user=%s kn=%s", request_id, user_id, label
         )
     finally:
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+        if status_message is not None:
+            try:
+                await status_message.delete()
+            except TelegramAPIError:
+                LOGGER.debug("%s progress status delete failed", request_id)
         jobs.pop(key, None)
 
 
@@ -469,6 +509,18 @@ async def _send_ack(
         LOGGER.warning(
             "%s ack send failed: user=%s input=%s", request_id, user_id, label
         )
+
+
+_PROGRESS_TICK_S = 2.5
+_PROGRESS_BAR_CELLS = 16
+
+
+def render_progress(percent: float) -> str:
+    """Текст статуса: прогресс-бар и проценты, без служебных деталей."""
+    bounded = min(100.0, max(0.0, percent))
+    filled = round(_PROGRESS_BAR_CELLS * bounded / 100.0)
+    bar = "▓" * filled + "░" * (_PROGRESS_BAR_CELLS - filled)
+    return f"⏳ Формирую экспресс-оценку\n{bar} {int(bounded)}%"
 
 
 def build_router(

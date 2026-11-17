@@ -50,7 +50,7 @@ def _fake_backend(pdf_content: str | None = None):
         pdf_content = base64.b64encode(PDF_BYTES).decode("ascii")
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         calls.append((name, dict(arguments)))
         if name == "terralogic_prepare_case":
             return _envelope({"case_id": CASE_ID, "collection_run_id": RUN_ID})
@@ -95,7 +95,7 @@ async def test_happy_path_calls_three_tools_and_returns_pdf_bytes():
     ],
 )
 async def test_error_envelope_mapping(code, expected):
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _error(code)
 
     client = _client(fake_call)
@@ -104,7 +104,7 @@ async def test_error_envelope_mapping(code, expected):
 
 
 async def test_transport_error_maps_to_unavailable():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         raise ConnectionError("refused")
 
     client = _client(fake_call)
@@ -115,7 +115,7 @@ async def test_transport_error_maps_to_unavailable():
 async def test_get_collection_status_uses_never_policy():
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         calls.append((name, dict(arguments)))
         return _envelope(
             {
@@ -161,7 +161,7 @@ async def test_get_collection_status_uses_never_policy():
 
 
 async def test_timeout_maps_to_unavailable():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         raise TimeoutError("read timeout")
 
     client = _client(fake_call)
@@ -184,7 +184,7 @@ async def test_corrupted_base64_payload():
 
 
 async def test_incomplete_case_result():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _envelope({"case_id": "", "collection_run_id": ""})
 
     client = _client(fake_call)
@@ -195,7 +195,7 @@ async def test_incomplete_case_result():
 async def test_submit_feedback_calls_tool_with_vote():
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         calls.append((name, dict(arguments)))
         return _envelope(
             {
@@ -221,7 +221,7 @@ async def test_submit_feedback_calls_tool_with_vote():
 
 
 async def test_submit_feedback_error_mapping():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _error("internal_error")
 
     client = _client(fake_call)
@@ -240,7 +240,7 @@ def _fake_listing_backend(pdf_content: str | None = None):
         pdf_content = base64.b64encode(PDF_BYTES).decode("ascii")
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         calls.append((name, dict(arguments)))
         if name == "terralogic_prepare_case_from_listing":
             return _envelope(
@@ -293,7 +293,7 @@ COORDS = "55.488626, 38.009447"
 def _fake_coords_backend():
     calls: list[tuple[str, dict]] = []
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         calls.append((name, dict(arguments)))
         if name == "terralogic_prepare_case_at_coords":
             return _envelope(
@@ -334,7 +334,7 @@ async def test_coords_happy_path_returns_pdf_and_resolution():
 
 
 async def test_coords_incomplete_payload_is_unexpected_error():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _envelope({"resolution": {}, "case": {}})
 
     client = _client(fake_call)
@@ -345,7 +345,7 @@ async def test_coords_incomplete_payload_is_unexpected_error():
 async def test_listing_resolution_failed_maps_to_dedicated_error():
     from terralogic_bot.errors import ListingResolutionFailed
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _error(
             "listing_resolution_failed",
             "no_landplots_at_coordinates: the pin may be approximate",
@@ -368,7 +368,7 @@ async def test_listing_resolution_failed_carries_nearby_details():
         {"cadastral_number": "50:13:0020303:260", "distance_m": 100.0},
     ]
 
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _error(
             "listing_resolution_failed",
             "no cadastral candidates returned",
@@ -382,7 +382,7 @@ async def test_listing_resolution_failed_carries_nearby_details():
 
 
 async def test_listing_incomplete_payload_is_unexpected_error():
-    async def fake_call(name, arguments):
+    async def fake_call(name, arguments, progress_callback=None):
         return _envelope(
             {
                 "resolution": {"cadastral_number": ""},
