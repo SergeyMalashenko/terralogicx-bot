@@ -47,14 +47,22 @@ from terralogic_bot.quota import QuotaStore
 
 KN = "50:21:0030210:123"
 LISTING_URL = (
-    "https://www.avito.ru/domodedovo/zemelnye_uchastki/"
-    "uchastok_10_sot._izhs_8110049401"
+    "https://www.avito.ru/domodedovo/zemelnye_uchastki/uchastok_10_sot._izhs_8110049401"
 )
 
 
 class _FakeUser:
-    def __init__(self, user_id: int) -> None:
+    def __init__(
+        self,
+        user_id: int,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> None:
         self.id = user_id
+        self.username = username
+        self.first_name = first_name
+        self.last_name = last_name
 
 
 class FakeSentMessage:
@@ -76,9 +84,9 @@ class FakeSentMessage:
 class FakeMessage:
     """Минимальный контракт aiogram Message, используемый handlers."""
 
-    def __init__(self, text: str | None, user_id: int = 42) -> None:
+    def __init__(self, text: str | None, user_id: int = 42, **user_kw) -> None:
         self.text = text
-        self.from_user = _FakeUser(user_id)
+        self.from_user = _FakeUser(user_id, **user_kw)
         self.answers: list[str] = []
         # Статус прогресса («⏳ …») хранится отдельно, чтобы не смешивать
         # служебные правки с содержательными ответами бота.
@@ -315,6 +323,25 @@ async def test_start(tmp_path):
     message = FakeMessage("/start")
     await _handler(router, "start")(message)
     assert message.answers == [START_TEXT]
+
+
+async def test_user_registered_in_quota_store(tmp_path):
+    quota = QuotaStore(tmp_path / "quota.sqlite3")
+    router = build_router(FakeClient(), _settings(tmp_path), quota)
+    message = FakeMessage(
+        "/start",
+        user_id=798610197,
+        username="sergey_malashenko",
+        first_name="Sergey",
+        last_name="Malashenko",
+    )
+    await _handler(router, "start")(message)
+    users = quota.list_users()
+    assert len(users) == 1
+    assert users[0]["user_id"] == 798610197
+    assert users[0]["username"] == "sergey_malashenko"
+    assert users[0]["first_name"] == "Sergey"
+    quota.close()
 
 
 async def test_help(tmp_path):
@@ -814,9 +841,7 @@ class _SlowProgressClient:
         )
 
 
-async def test_progress_status_edited_monotonically_and_removed(
-    tmp_path, monkeypatch
-):
+async def test_progress_status_edited_monotonically_and_removed(tmp_path, monkeypatch):
     monkeypatch.setattr("terralogic_bot.handlers._PROGRESS_TICK_S", 0.005)
     message = FakeMessage(KN)
     await _report_job(

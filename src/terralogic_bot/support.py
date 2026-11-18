@@ -29,6 +29,7 @@ from aiogram.types import (
 )
 
 from .config import Settings
+from .quota import QuotaStore, remember_user
 
 LOGGER = logging.getLogger("terralogic_bot.support")
 
@@ -63,9 +64,7 @@ SUPPORT_EXPIRED_TEXT = (
 
 SUPPORT_SENT_TEXT = "Передано в поддержку ✅"
 
-SUPPORT_FAILED_TEXT = (
-    "Не удалось передать сообщение в поддержку.\n\nПопробуйте позже."
-)
+SUPPORT_FAILED_TEXT = "Не удалось передать сообщение в поддержку.\n\nПопробуйте позже."
 
 SUPPORT_REPLY_PREFIX = "Ответ поддержки:"
 
@@ -212,7 +211,11 @@ def _user_header(message: Message) -> str:
     return " ".join(parts)
 
 
-def build_support_router(settings: Settings, store: SupportStore) -> Router:
+def build_support_router(
+    settings: Settings,
+    store: SupportStore,
+    quota: QuotaStore | None = None,
+) -> Router:
     """Router поддержки: регистрируется ДО основного, перехватывает
     сообщения пользователей в активной сессии и весь трафик группы."""
     router = Router(name="terralogicx-support")
@@ -222,6 +225,7 @@ def build_support_router(settings: Settings, store: SupportStore) -> Router:
         user = message.from_user
         if user is None:
             return
+        remember_user(quota, user)
         if group_id is None:
             await message.answer(SUPPORT_DISABLED_TEXT)
             return
@@ -237,6 +241,7 @@ def build_support_router(settings: Settings, store: SupportStore) -> Router:
     async def support_callback(query: CallbackQuery) -> None:
         action = (query.data or "").split(":", 1)[1]
         user = query.from_user
+        remember_user(quota, user)
         if action == "start":
             if group_id is None:
                 await query.answer(SUPPORT_DISABLED_TEXT)
@@ -262,28 +267,23 @@ def build_support_router(settings: Settings, store: SupportStore) -> Router:
     @router.message(F.chat.type == "private", in_session)
     async def relay_to_group(message: Message, bot: Bot) -> None:
         user = message.from_user
+        remember_user(quota, user)
         if group_id is None:  # конфигурацию убрали при активной сессии
             store.close_session(user.id)
             await message.answer(SUPPORT_DISABLED_TEXT)
             return
         try:
             header = await bot.send_message(group_id, _user_header(message))
-            copy = await bot.copy_message(
-                group_id, message.chat.id, message.message_id
-            )
+            copy = await bot.copy_message(group_id, message.chat.id, message.message_id)
         except TelegramAPIError:
-            LOGGER.warning(
-                "support relay failed: user=%s", user.id, exc_info=True
-            )
+            LOGGER.warning("support relay failed: user=%s", user.id, exc_info=True)
             await message.answer(SUPPORT_FAILED_TEXT)
             return
         store.add_link(header.message_id, user.id)
         store.add_link(copy.message_id, user.id)
         store.touch_session(user.id)
         await message.answer(SUPPORT_SENT_TEXT, reply_markup=support_stop_keyboard())
-        LOGGER.info(
-            "support → group: user=%s group_msg=%s", user.id, copy.message_id
-        )
+        LOGGER.info("support → group: user=%s group_msg=%s", user.id, copy.message_id)
 
     @router.message(F.chat.id == group_id)
     async def relay_to_user(message: Message, bot: Bot) -> None:
@@ -300,9 +300,7 @@ def build_support_router(settings: Settings, store: SupportStore) -> Router:
             await bot.send_message(user_id, SUPPORT_REPLY_PREFIX)
             await bot.copy_message(user_id, message.chat.id, message.message_id)
         except TelegramAPIError:
-            LOGGER.warning(
-                "support reply to user %s failed", user_id, exc_info=True
-            )
+            LOGGER.warning("support reply to user %s failed", user_id, exc_info=True)
             return
         if store.session_age(user_id) is not None:
             store.touch_session(user_id)

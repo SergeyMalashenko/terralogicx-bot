@@ -235,6 +235,22 @@ async def test_support_cmd_disabled_without_group(tmp_path):
     store.close()
 
 
+async def test_support_cmd_registers_user_in_quota(tmp_path):
+    from terralogic_bot.quota import QuotaStore
+
+    store = SupportStore(tmp_path / "support.sqlite3")
+    quota = QuotaStore(tmp_path / "quota.sqlite3")
+    router = build_support_router(_settings(), store, quota)
+    message = FakeMessage("/support")
+    await _handler(router, "support_cmd")(message)
+
+    users = quota.list_users()
+    assert [u["user_id"] for u in users] == [USER_ID]
+    assert users[0]["username"] == "ivan"
+    store.close()
+    quota.close()
+
+
 async def test_support_callback_start_and_stop(tmp_path):
     store = SupportStore(tmp_path / "support.sqlite3")
     router = build_support_router(_settings(), store)
@@ -264,10 +280,10 @@ async def test_relay_to_group_copies_message_and_links_ids(tmp_path):
     await _handler(router, "relay_to_group")(message, bot)
 
     assert message.answers == [SUPPORT_SENT_TEXT]
-    (header_chat, header_text), = bot.sent
+    ((header_chat, header_text),) = bot.sent
     assert header_chat == GROUP_ID
     assert "Иван Иванов" in header_text and f"id {USER_ID}" in header_text
-    (copy_chat, from_chat, copy_id), = bot.copied
+    ((copy_chat, from_chat, copy_id),) = bot.copied
     assert (copy_chat, from_chat, copy_id) == (GROUP_ID, USER_ID, 77)
 
     # оба сообщения в группе маршрутизируют ответ обратно пользователю

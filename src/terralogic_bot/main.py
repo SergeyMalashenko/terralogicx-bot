@@ -29,7 +29,9 @@ async def _run(settings: Settings) -> None:
     quota_store = QuotaStore(settings.quota_db_path)
     dispatcher = Dispatcher()
     # поддержка первой: перехватывает сообщения активных сессий и группы
-    dispatcher.include_router(build_support_router(settings, support_store))
+    dispatcher.include_router(
+        build_support_router(settings, support_store, quota_store)
+    )
     dispatcher.include_router(build_router(client, settings, quota_store))
     bot = Bot(settings.telegram_bot_token, session=session)
     sweeper = asyncio.create_task(

@@ -41,7 +41,7 @@ from .errors import (
     TerraLogicUnavailable,
 )
 from .models import CollectionStatus, ListingResolution
-from .quota import QuotaStore
+from .quota import QuotaStore, remember_user
 from .support import support_start_button
 
 LOGGER = logging.getLogger("terralogic_bot")
@@ -89,8 +89,7 @@ LISTING_ACCEPTED_TEXT = (
 )
 
 COORDS_ACCEPTED_TEXT = (
-    "Принял координаты.\n\n"
-    "Определяю участок по координатам и формирую экспресс-оценку."
+    "Принял координаты.\n\nОпределяю участок по координатам и формирую экспресс-оценку."
 )
 
 COORDS_FAILED_TEXT = (
@@ -319,15 +318,12 @@ def render_resolution_note(resolution: ListingResolution) -> str:
     if resolution.warnings:
         parts.append("")
         parts.extend(
-            render_resolution_warning(warning)
-            for warning in resolution.warnings
+            render_resolution_warning(warning) for warning in resolution.warnings
         )
     return "\n".join(parts)
 
 
-def render_collection_status(
-    cadastral_number: str, status: CollectionStatus
-) -> str:
+def render_collection_status(cadastral_number: str, status: CollectionStatus) -> str:
     """Статический текст сводки сбора для /status (без LLM)."""
     header_status = _COLLECTION_STATUS_LABELS.get(
         status.collection_status, status.collection_status
@@ -458,7 +454,10 @@ async def _report_job(
             await message.answer(render_listing_failed_text(exc))
         LOGGER.info(
             "%s listing resolution failed: user=%s input=%s error=%s",
-            request_id, user_id, label, exc,
+            request_id,
+            user_id,
+            label,
+            exc,
         )
     except ParcelNotFound:
         await message.answer(NOT_FOUND_TEXT.format(cadastral_number=label))
@@ -467,19 +466,24 @@ async def _report_job(
         await message.answer(UNAVAILABLE_TEXT)
         LOGGER.warning(
             "%s unavailable: user=%s kn=%s error=%s",
-            request_id, user_id, label, exc,
+            request_id,
+            user_id,
+            label,
+            exc,
         )
     except BotError as exc:
         await message.answer(FAILED_TEXT)
         LOGGER.warning(
             "%s failed: user=%s kn=%s error=%s: %s",
-            request_id, user_id, label, type(exc).__name__, exc,
+            request_id,
+            user_id,
+            label,
+            type(exc).__name__,
+            exc,
         )
     except Exception:  # последний рубеж, traceback только в лог
         await message.answer(FAILED_TEXT)
-        LOGGER.exception(
-            "%s unexpected: user=%s kn=%s", request_id, user_id, label
-        )
+        LOGGER.exception("%s unexpected: user=%s kn=%s", request_id, user_id, label)
     finally:
         ticker.cancel()
         try:
@@ -537,14 +541,17 @@ def build_router(
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
+        remember_user(quota, message.from_user)
         await message.answer(START_TEXT)
 
     @router.message(Command("help"))
     async def help_(message: Message) -> None:
+        remember_user(quota, message.from_user)
         await message.answer(HELP_TEXT)
 
     @router.message(Command("status"))
     async def status(message: Message, command: CommandObject) -> None:
+        remember_user(quota, message.from_user)
         cadastral_number = parse_cadastral_number(command.args or "")
         if cadastral_number is None:
             await message.answer(STATUS_USAGE_TEXT)
@@ -559,31 +566,44 @@ def build_router(
             )
             LOGGER.info(
                 "%s status not collected: user=%s kn=%s",
-                request_id, user_id, cadastral_number,
+                request_id,
+                user_id,
+                cadastral_number,
             )
             return
         except (SourceUnavailable, TerraLogicUnavailable) as exc:
             await message.answer(UNAVAILABLE_TEXT)
             LOGGER.warning(
                 "%s status unavailable: user=%s kn=%s error=%s",
-                request_id, user_id, cadastral_number, exc,
+                request_id,
+                user_id,
+                cadastral_number,
+                exc,
             )
             return
         except BotError as exc:
             await message.answer(FAILED_TEXT)
             LOGGER.warning(
                 "%s status failed: user=%s kn=%s error=%s: %s",
-                request_id, user_id, cadastral_number, type(exc).__name__, exc,
+                request_id,
+                user_id,
+                cadastral_number,
+                type(exc).__name__,
+                exc,
             )
             return
         await message.answer(render_collection_status(cadastral_number, summary))
         LOGGER.info(
             "%s status ok: user=%s kn=%s case=%s",
-            request_id, user_id, cadastral_number, summary.case_id,
+            request_id,
+            user_id,
+            cadastral_number,
+            summary.case_id,
         )
 
     @router.message(F.text)
     async def cadastral(message: Message) -> None:
+        remember_user(quota, message.from_user)
         text = message.text or ""
         cadastral_number = parse_cadastral_number(text)
         listing_url = parse_listing_url(text)
@@ -641,7 +661,9 @@ def build_router(
                 return
             LOGGER.info(
                 "%s accepted listing: user=%s url=%s",
-                request_id, user_id, listing_url,
+                request_id,
+                user_id,
+                listing_url,
             )
             await _send_ack(
                 message,
@@ -670,7 +692,9 @@ def build_router(
                 return
             LOGGER.info(
                 "%s accepted coords: user=%s coords=%s",
-                request_id, user_id, coordinates,
+                request_id,
+                user_id,
+                coordinates,
             )
             await _send_ack(
                 message,
@@ -695,6 +719,7 @@ def build_router(
 
     @router.callback_query(F.data.startswith(f"{_FEEDBACK_PREFIX}:"))
     async def feedback(query: CallbackQuery) -> None:
+        remember_user(quota, query.from_user)
         parsed = parse_feedback_data(query.data or "")
         if parsed is None:
             await query.answer()
@@ -710,7 +735,11 @@ def build_router(
         except BotError as exc:
             LOGGER.warning(
                 "feedback failed: user=%s kn=%s vote=%s error=%s: %s",
-                user_id, cadastral_number, vote, type(exc).__name__, exc,
+                user_id,
+                cadastral_number,
+                vote,
+                type(exc).__name__,
+                exc,
             )
             await query.answer(FEEDBACK_FAILED_TEXT)
             return
@@ -729,8 +758,6 @@ def build_router(
             try:
                 await message.edit_reply_markup(reply_markup=None)
             except TelegramAPIError:  # устаревшее сообщение — оценка уже сохранена
-                LOGGER.debug(
-                    "feedback keyboard not removed: kn=%s", cadastral_number
-                )
+                LOGGER.debug("feedback keyboard not removed: kn=%s", cadastral_number)
 
     return router
