@@ -133,8 +133,10 @@ def test_remember_user_tolerates_store_failure():
 
 def test_payment_lifecycle(tmp_path):
     store = QuotaStore(tmp_path / "quota.sqlite3")
-    inv1 = store.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
-    inv2 = store.create_payment(7, package_code="pack20", reports=20, amount_rub=1490.0)
+    inv1 = store.create_payment(
+        42, package_code="report1", reports=1, amount_rub=4000.0
+    )
+    inv2 = store.create_payment(7, package_code="report1", reports=1, amount_rub=4000.0)
     assert inv2 == inv1 + 1
 
     payment = store.get_payment(inv1)
@@ -142,11 +144,11 @@ def test_payment_lifecycle(tmp_path):
     assert payment["user_id"] == 42
 
     paid = store.mark_payment_paid(inv1)
-    assert paid["reports"] == 5
-    assert store.credits(42) == 5
+    assert paid["reports"] == 1
+    assert store.credits(42) == 1
     # повторное зачисление невозможно
     assert store.mark_payment_paid(inv1) is None
-    assert store.credits(42) == 5
+    assert store.credits(42) == 1
     store.close()
 
 
@@ -156,17 +158,17 @@ def test_available_and_consume_order(tmp_path):
     for _ in range(3):
         store.record(42)
     assert store.available(42, 5) == 2
-    # купили пакет из 5
-    inv = store.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+    # купили один отчёт
+    inv = store.create_payment(42, package_code="report1", reports=1, amount_rub=4000.0)
     store.mark_payment_paid(inv)
-    assert store.available(42, 5) == 7
+    assert store.available(42, 5) == 3
     # сначала догорают бесплатные
     assert store.consume(42, 5) == "free"
     assert store.consume(42, 5) == "free"
-    assert store.available(42, 5) == 5
-    # затем платные кредиты
+    assert store.available(42, 5) == 1
+    # затем платный кредит
     assert store.consume(42, 5) == "paid"
-    assert store.credits(42) == 4
+    assert store.credits(42) == 0
     store.close()
 
 

@@ -36,7 +36,7 @@ class PaymentRejected(PaymentError):
 
 @dataclass(frozen=True)
 class PaymentPackage:
-    """Пакет отчётов: кнопка на paywall-экране."""
+    """Покупка на paywall-экране: сколько отчётов и за сколько."""
 
     code: str
     title: str
@@ -48,9 +48,10 @@ class PaymentPackage:
         return f"{self.price_rub:g} ₽"
 
 
+# Схема оплаты: после исчерпания бесплатного лимита каждый следующий
+# отчёт оплачивается отдельно.
 PACKAGES: tuple[PaymentPackage, ...] = (
-    PaymentPackage(code="pack5", title="5 отчётов", reports=5, price_rub=490.0),
-    PaymentPackage(code="pack20", title="20 отчётов", reports=20, price_rub=1490.0),
+    PaymentPackage(code="report1", title="1 отчёт", reports=1, price_rub=4000.0),
 )
 
 _PACKAGES_BY_CODE = {package.code: package for package in PACKAGES}

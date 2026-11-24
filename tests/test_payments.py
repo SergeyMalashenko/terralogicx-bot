@@ -34,10 +34,10 @@ def _payment_url(**overrides):
 def test_payment_url_signature_matches_docs_formula():
     url = _payment_url()
     query = parse_qs(urlparse(url).query)
-    expected = hashlib.md5(b"demo:490.00:7:p1:Shp_user_id=42").hexdigest()
+    expected = hashlib.md5(b"demo:4000.00:7:p1:Shp_user_id=42").hexdigest()
     assert query["SignatureValue"] == [expected]
     assert query["MerchantLogin"] == ["demo"]
-    assert query["OutSum"] == ["490.00"]
+    assert query["OutSum"] == ["4000.00"]
     assert query["InvId"] == ["7"]
     assert query["Shp_user_id"] == ["42"]
     assert query["IsTest"] == ["1"]
@@ -55,7 +55,7 @@ def test_payment_url_description_mentions_package():
 
 
 def test_get_package_lookup():
-    assert get_package("pack5") is PACKAGES[0]
+    assert get_package("report1") is PACKAGES[0]
     assert get_package("nope") is None
 
 
