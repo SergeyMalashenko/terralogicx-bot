@@ -58,7 +58,7 @@ def test_settings_unlimited_users_from_env():
 
 def test_settings_quota_defaults():
     settings = Settings.from_env({"TELEGRAM_BOT_TOKEN": "t"})
-    assert settings.report_limit == 5
+    assert settings.report_limit == 3
     assert settings.unlimited_user_ids == frozenset()
     assert settings.quota_db_path == "data/quota.sqlite3"
 
@@ -134,9 +134,9 @@ def test_remember_user_tolerates_store_failure():
 def test_payment_lifecycle(tmp_path):
     store = QuotaStore(tmp_path / "quota.sqlite3")
     inv1 = store.create_payment(
-        42, package_code="report1", reports=1, amount_rub=4000.0
+        42, package_code="report1", reports=1, amount_rub=3000.0
     )
-    inv2 = store.create_payment(7, package_code="report1", reports=1, amount_rub=4000.0)
+    inv2 = store.create_payment(7, package_code="report1", reports=1, amount_rub=3000.0)
     assert inv2 == inv1 + 1
 
     payment = store.get_payment(inv1)
@@ -159,7 +159,7 @@ def test_available_and_consume_order(tmp_path):
         store.record(42)
     assert store.available(42, 5) == 2
     # купили один отчёт
-    inv = store.create_payment(42, package_code="report1", reports=1, amount_rub=4000.0)
+    inv = store.create_payment(42, package_code="report1", reports=1, amount_rub=3000.0)
     store.mark_payment_paid(inv)
     assert store.available(42, 5) == 3
     # сначала догорают бесплатные

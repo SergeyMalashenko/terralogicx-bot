@@ -742,7 +742,7 @@ async def test_listing_duplicate_active_request_rejected(tmp_path):
 async def test_report_limit_blocks_request(tmp_path):
     """Лимит исчерпан: задача не запускается, backend не вызывается."""
     quota = QuotaStore(":memory:")
-    for _ in range(5):
+    for _ in range(3):
         quota.record(42)
     client = FakeClient()
     router = build_router(client, _settings(tmp_path), quota)
@@ -750,7 +750,7 @@ async def test_report_limit_blocks_request(tmp_path):
     await _handler(router, "cadastral")(message)
     assert len(message.answers) == 1
     assert "все бесплатные отчёты" in message.answers[0]
-    assert "(5 шт.)" in message.answers[0]
+    assert "(3 шт.)" in message.answers[0]
     assert client.calls == []
     assert message.documents == []
 
@@ -772,7 +772,7 @@ def _paid_settings(tmp_path: Path) -> Settings:
 
 def _exhausted_quota() -> QuotaStore:
     quota = QuotaStore(":memory:")
-    for _ in range(5):
+    for _ in range(3):
         quota.record(42)
     return quota
 
@@ -796,7 +796,7 @@ async def test_paywall_keyboard_lists_packages(tmp_path):
     await _handler(router, "cadastral")(message)
     keyboard = message.markups[0]
     texts = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert any("1 отчёт" in text and "4000" in text for text in texts)
+    assert any("1 отчёт" in text and "3000" in text for text in texts)
     callbacks = [
         button.callback_data
         for row in keyboard.inline_keyboard
@@ -829,7 +829,7 @@ async def test_pay_buy_creates_invoice_with_payment_link(tmp_path):
 async def test_pay_check_paid_credits_reports(tmp_path):
     quota = _exhausted_quota()
     inv_id = quota.create_payment(
-        42, package_code="report1", reports=1, amount_rub=4000.0
+        42, package_code="report1", reports=1, amount_rub=3000.0
     )
 
     async def fake_checker(inv: int) -> str:
@@ -845,7 +845,7 @@ async def test_pay_check_paid_credits_reports(tmp_path):
     await _callback_handler(router, "pay_check")(query)
 
     assert quota.credits(42) == 1
-    assert quota.available(42, 5) == 1
+    assert quota.available(42, 3) == 1
     assert any("Оплата получена" in text for text in query.message.answers)
     # повторная проверка не начисляет дважды
     query2 = FakeCallbackQuery(f"pay:check:{inv_id}", user_id=42)
@@ -856,7 +856,7 @@ async def test_pay_check_paid_credits_reports(tmp_path):
 async def test_pay_check_pending_keeps_waiting(tmp_path):
     quota = _exhausted_quota()
     inv_id = quota.create_payment(
-        42, package_code="report1", reports=1, amount_rub=4000.0
+        42, package_code="report1", reports=1, amount_rub=3000.0
     )
 
     async def fake_checker(inv: int) -> str:
@@ -878,7 +878,7 @@ async def test_pay_check_pending_keeps_waiting(tmp_path):
 async def test_pay_check_rejects_foreign_invoice(tmp_path):
     quota = _exhausted_quota()
     inv_id = quota.create_payment(
-        42, package_code="report1", reports=1, amount_rub=4000.0
+        42, package_code="report1", reports=1, amount_rub=3000.0
     )
 
     async def fake_checker(inv: int) -> str:
@@ -901,7 +901,7 @@ async def test_paid_user_gets_report_after_purchase(tmp_path):
     """После покупки пакета запрос снова идёт в backend и списывает кредит."""
     quota = _exhausted_quota()
     inv_id = quota.create_payment(
-        42, package_code="report1", reports=1, amount_rub=4000.0
+        42, package_code="report1", reports=1, amount_rub=3000.0
     )
     quota.mark_payment_paid(inv_id)
     client = FakeClient()
@@ -911,7 +911,7 @@ async def test_paid_user_gets_report_after_purchase(tmp_path):
     await _wait_for(lambda: len(message.documents) == 1)
     assert client.calls == [KN]
     assert quota.credits(42) == 0
-    assert quota.used(42) == 5  # бесплатный счётчик не тронут
+    assert quota.used(42) == 3  # бесплатный счётчик не тронут
 
 
 async def test_successful_report_consumes_quota(tmp_path):

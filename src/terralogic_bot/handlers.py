@@ -115,7 +115,7 @@ LIMIT_REACHED_TEXT = (
 
 PAYWALL_TEXT = (
     "Вы использовали все бесплатные отчёты ({limit} шт.).\n\n"
-    "Каждый следующий отчёт — 4000 ₽. Для оплаты нажмите кнопку ниже "
+    "Каждый следующий отчёт — {price}. Для оплаты нажмите кнопку ниже "
     "— или напишите в поддержку."
 )
 
@@ -688,7 +688,10 @@ def build_router(
                 ]
                 buttons.append([support_start_button()])
                 await message.answer(
-                    PAYWALL_TEXT.format(limit=settings.report_limit),
+                    PAYWALL_TEXT.format(
+                        limit=settings.report_limit,
+                        price=PACKAGES[0].price_label,
+                    ),
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
                 )
             else:

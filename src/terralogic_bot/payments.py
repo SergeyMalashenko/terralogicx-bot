@@ -51,7 +51,7 @@ class PaymentPackage:
 # Схема оплаты: после исчерпания бесплатного лимита каждый следующий
 # отчёт оплачивается отдельно.
 PACKAGES: tuple[PaymentPackage, ...] = (
-    PaymentPackage(code="report1", title="1 отчёт", reports=1, price_rub=4000.0),
+    PaymentPackage(code="report1", title="1 отчёт", reports=1, price_rub=3000.0),
 )
 
 _PACKAGES_BY_CODE = {package.code: package for package in PACKAGES}
