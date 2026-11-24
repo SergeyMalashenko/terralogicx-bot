@@ -129,3 +129,51 @@ def test_remember_user_tolerates_store_failure():
     remember_user(_BrokenStore(), _User())  # не падает
     remember_user(None, _User())  # quota не подключена
     remember_user(QuotaStore(":memory:"), None)  # анонимный апдейт
+
+
+def test_payment_lifecycle(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    inv1 = store.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+    inv2 = store.create_payment(7, package_code="pack20", reports=20, amount_rub=1490.0)
+    assert inv2 == inv1 + 1
+
+    payment = store.get_payment(inv1)
+    assert payment["status"] == "pending"
+    assert payment["user_id"] == 42
+
+    paid = store.mark_payment_paid(inv1)
+    assert paid["reports"] == 5
+    assert store.credits(42) == 5
+    # повторное зачисление невозможно
+    assert store.mark_payment_paid(inv1) is None
+    assert store.credits(42) == 5
+    store.close()
+
+
+def test_available_and_consume_order(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    # 3 из 5 бесплатных потрачено
+    for _ in range(3):
+        store.record(42)
+    assert store.available(42, 5) == 2
+    # купили пакет из 5
+    inv = store.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+    store.mark_payment_paid(inv)
+    assert store.available(42, 5) == 7
+    # сначала догорают бесплатные
+    assert store.consume(42, 5) == "free"
+    assert store.consume(42, 5) == "free"
+    assert store.available(42, 5) == 5
+    # затем платные кредиты
+    assert store.consume(42, 5) == "paid"
+    assert store.credits(42) == 4
+    store.close()
+
+
+def test_consume_without_credits_falls_back_to_free(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    for _ in range(5):
+        store.record(42)
+    assert store.consume(42, 5) == "free"  # гонка/безлимит — минуса нет
+    assert store.credits(42) == 0
+    store.close()

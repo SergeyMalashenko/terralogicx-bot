@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 
@@ -41,6 +42,14 @@ from .errors import (
     TerraLogicUnavailable,
 )
 from .models import CollectionStatus, ListingResolution
+from .payments import (
+    PACKAGES,
+    PaymentError,
+    PaymentRejected,
+    build_payment_url,
+    check_invoice,
+    get_package,
+)
 from .quota import QuotaStore, remember_user
 from .support import support_start_button
 
@@ -103,6 +112,37 @@ LIMIT_REACHED_TEXT = (
     "Чтобы продолжить пользоваться сервисом, напишите в поддержку — "
     "обсудим условия."
 )
+
+PAYWALL_TEXT = (
+    "Вы использовали все бесплатные отчёты ({limit} шт.).\n\n"
+    "Выберите пакет отчётов — или напишите в поддержку."
+)
+
+PAY_INVOICE_TEXT = (
+    "Счёт на {title} — {price}.\n\n"
+    "Оплатите по кнопке ниже, затем нажмите «Проверить оплату»."
+)
+
+PAY_PAID_TEXT = (
+    "Оплата получена ✅\n\n"
+    "Начислено отчётов: {reports}. Отправьте кадастровый номер, "
+    "ссылку на объявление или координаты участка."
+)
+
+PAY_PENDING_TEXT = (
+    "Платёж пока не подтверждён.\n\n"
+    "Если вы уже оплатили — подождите минуту и нажмите "
+    "«Проверить оплату» ещё раз."
+)
+
+PAY_CANCELLED_TEXT = (
+    "Этот счёт отменён или истёк.\n\nВыберите пакет ещё раз — сформирую новый счёт."
+)
+
+PAY_FAILED_TEXT = "Не удалось проверить оплату.\n\nПопробуйте ещё раз чуть позже."
+
+_PAY_BUY_PREFIX = "pay:buy:"
+_PAY_CHECK_PREFIX = "pay:check:"
 
 LISTING_FAILED_TEXT = (
     "Не удалось определить участок по ссылке на объявление.\n\n"
@@ -376,6 +416,7 @@ async def _report_job(
     listing_url: str | None = None,
     coordinates: str | None = None,
     quota: QuotaStore | None = None,
+    report_limit: int = 5,
 ) -> None:
     """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram.
 
@@ -436,8 +477,8 @@ async def _report_job(
             reply_markup=feedback_keyboard(resolved),
         )
         if quota is not None:
-            used = quota.record(user_id)
-            LOGGER.info("%s quota: user=%s used=%s", request_id, user_id, used)
+            source = quota.consume(user_id, report_limit)
+            LOGGER.info("%s quota: user=%s source=%s", request_id, user_id, source)
         LOGGER.info(
             "%s done: user=%s kn=%s case=%s run=%s %.1fs",
             request_id,
@@ -531,10 +572,24 @@ def build_router(
     client: TerraLogicClient,
     settings: Settings,
     quota: QuotaStore | None = None,
+    payment_checker: Callable[[int], Awaitable[str]] | None = None,
 ) -> Router:
-    """Router с замкнутыми зависимостями: client, лимиты, active jobs."""
+    """Router с замкнутыми зависимостями: client, лимиты, active jobs.
+
+    payment_checker(inv_id) -> 'paid' | 'pending' | 'cancelled' — точка
+    инъекции для тестов; по умолчанию реальный опрос Robokassa OpStateExt.
+    """
     if quota is None:
         quota = QuotaStore(":memory:")
+    if payment_checker is None and settings.payments_enabled:
+
+        async def payment_checker(inv_id: int) -> str:  # type: ignore[no-redef]
+            return await check_invoice(
+                merchant_login=settings.robokassa_merchant_login or "",
+                password2=settings.robokassa_password2 or "",
+                inv_id=inv_id,
+            )
+
     router = Router(name="terralogicx-bot")
     semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
     jobs: dict[tuple[int, str], asyncio.Task] = {}
@@ -617,15 +672,31 @@ def build_router(
         user_id = message.from_user.id if message.from_user else 0
         request_id = uuid.uuid4().hex[:8]
         if user_id not in settings.unlimited_user_ids and (
-            quota.remaining(user_id, settings.report_limit) <= 0
+            quota.available(user_id, settings.report_limit) <= 0
         ):
             LOGGER.info("%s limit reached: user=%s", request_id, user_id)
-            await message.answer(
-                LIMIT_REACHED_TEXT.format(limit=settings.report_limit),
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[support_start_button()]]
-                ),
-            )
+            if settings.payments_enabled:
+                buttons = [
+                    [
+                        InlineKeyboardButton(
+                            text=f"💳 {package.title} — {package.price_label}",
+                            callback_data=f"{_PAY_BUY_PREFIX}{package.code}",
+                        )
+                    ]
+                    for package in PACKAGES
+                ]
+                buttons.append([support_start_button()])
+                await message.answer(
+                    PAYWALL_TEXT.format(limit=settings.report_limit),
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                )
+            else:
+                await message.answer(
+                    LIMIT_REACHED_TEXT.format(limit=settings.report_limit),
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[[support_start_button()]]
+                    ),
+                )
             return
         if cadastral_number is not None:
             key = (user_id, cadastral_number)
@@ -652,6 +723,7 @@ def build_router(
                     request_id=request_id,
                     cadastral_number=cadastral_number,
                     quota=quota,
+                    report_limit=settings.report_limit,
                 )
             )
         elif listing_url is not None:
@@ -682,6 +754,7 @@ def build_router(
                     request_id=request_id,
                     listing_url=listing_url,
                     quota=quota,
+                    report_limit=settings.report_limit,
                 )
             )
         else:
@@ -713,6 +786,7 @@ def build_router(
                     request_id=request_id,
                     coordinates=coordinates,
                     quota=quota,
+                    report_limit=settings.report_limit,
                 )
             )
         jobs[key] = task
@@ -759,5 +833,102 @@ def build_router(
                 await message.edit_reply_markup(reply_markup=None)
             except TelegramAPIError:  # устаревшее сообщение — оценка уже сохранена
                 LOGGER.debug("feedback keyboard not removed: kn=%s", cadastral_number)
+
+    @router.callback_query(F.data.startswith(_PAY_BUY_PREFIX))
+    async def pay_buy(query: CallbackQuery) -> None:
+        """Выбор пакета на paywall-экране: создать счёт и дать ссылку."""
+        remember_user(quota, query.from_user)
+        if not settings.payments_enabled:
+            await query.answer()
+            return
+        package = get_package((query.data or "")[len(_PAY_BUY_PREFIX) :])
+        user_id = query.from_user.id if query.from_user else None
+        if package is None or user_id is None:
+            await query.answer()
+            return
+        inv_id = quota.create_payment(
+            user_id,
+            package_code=package.code,
+            reports=package.reports,
+            amount_rub=package.price_rub,
+        )
+        url = build_payment_url(
+            merchant_login=settings.robokassa_merchant_login or "",
+            password1=settings.robokassa_password1 or "",
+            inv_id=inv_id,
+            package=package,
+            user_id=user_id,
+            test=settings.robokassa_test,
+        )
+        LOGGER.info(
+            "payment invoice: user=%s inv=%s package=%s amount=%s test=%s",
+            user_id,
+            inv_id,
+            package.code,
+            package.price_rub,
+            settings.robokassa_test,
+        )
+        await query.answer()
+        await query.message.answer(
+            PAY_INVOICE_TEXT.format(title=package.title, price=package.price_label),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
+                    [
+                        InlineKeyboardButton(
+                            text="🔄 Проверить оплату",
+                            callback_data=f"{_PAY_CHECK_PREFIX}{inv_id}",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    @router.callback_query(F.data.startswith(_PAY_CHECK_PREFIX))
+    async def pay_check(query: CallbackQuery) -> None:
+        """«Проверить оплату»: опросить состояние счёта и начислить пакет."""
+        remember_user(quota, query.from_user)
+        user_id = query.from_user.id if query.from_user else None
+        raw_id = (query.data or "")[len(_PAY_CHECK_PREFIX) :]
+        inv_id = int(raw_id) if raw_id.isdigit() else 0
+        payment = quota.get_payment(inv_id) if inv_id else None
+        if (
+            not settings.payments_enabled
+            or payment is None
+            or user_id is None
+            or payment["user_id"] != user_id
+        ):
+            await query.answer()
+            return
+        if payment["status"] == "paid":
+            await query.answer("Этот счёт уже зачтён.")
+            return
+        try:
+            assert payment_checker is not None  # следует из payments_enabled
+            state = await payment_checker(inv_id)
+        except (PaymentError, PaymentRejected):
+            LOGGER.warning("payment check failed: inv=%s", inv_id, exc_info=True)
+            await query.answer(PAY_FAILED_TEXT)
+            return
+        if state == "paid":
+            paid = quota.mark_payment_paid(inv_id)
+            if paid is not None:
+                LOGGER.info(
+                    "payment paid: user=%s inv=%s reports=%s",
+                    user_id,
+                    inv_id,
+                    paid["reports"],
+                )
+                await query.answer()
+                await query.message.answer(
+                    PAY_PAID_TEXT.format(reports=paid["reports"])
+                )
+            else:  # параллельный клик уже зачли
+                await query.answer("Этот счёт уже зачтён.")
+            return
+        if state == "cancelled":
+            await query.answer(PAY_CANCELLED_TEXT)
+            return
+        await query.answer(PAY_PENDING_TEXT)
 
     return router

@@ -20,6 +20,18 @@ class Settings:
     report_limit: int = 5
     unlimited_user_ids: frozenset[int] = frozenset()
     quota_db_path: str = "data/quota.sqlite3"
+    robokassa_merchant_login: str | None = None
+    robokassa_password1: str | None = None
+    robokassa_password2: str | None = None
+    robokassa_test: bool = True
+
+    @property
+    def payments_enabled(self) -> bool:
+        return bool(
+            self.robokassa_merchant_login
+            and self.robokassa_password1
+            and self.robokassa_password2
+        )
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -60,20 +72,24 @@ class Settings:
             terralogic_mcp_url=source.get(
                 "TERRALOGIC_MCP_URL", "http://127.0.0.1:8004/mcp"
             ),
-            request_timeout_s=float(
-                source.get("TERRALOGIC_REQUEST_TIMEOUT_S", "900")
-            ),
+            request_timeout_s=float(source.get("TERRALOGIC_REQUEST_TIMEOUT_S", "900")),
             max_concurrent_reports=int(source.get("MAX_CONCURRENT_REPORTS", "2")),
             log_level=source.get("LOG_LEVEL", "INFO"),
             telegram_proxy=(source.get("TELEGRAM_PROXY") or "").strip() or None,
             support_group_id=support_group_id,
-            support_session_ttl_s=float(
-                source.get("SUPPORT_SESSION_TTL_S", "3600")
-            ),
-            support_db_path=source.get(
-                "SUPPORT_DB_PATH", "data/support.sqlite3"
-            ),
+            support_session_ttl_s=float(source.get("SUPPORT_SESSION_TTL_S", "3600")),
+            support_db_path=source.get("SUPPORT_DB_PATH", "data/support.sqlite3"),
             report_limit=int(source.get("REPORT_LIMIT", "5")),
             unlimited_user_ids=frozenset(unlimited_user_ids),
             quota_db_path=source.get("QUOTA_DB_PATH", "data/quota.sqlite3"),
+            robokassa_merchant_login=(
+                source.get("ROBOKASSA_MERCHANT_LOGIN") or ""
+            ).strip()
+            or None,
+            robokassa_password1=(source.get("ROBOKASSA_PASSWORD1") or "").strip()
+            or None,
+            robokassa_password2=(source.get("ROBOKASSA_PASSWORD2") or "").strip()
+            or None,
+            robokassa_test=(source.get("ROBOKASSA_TEST", "1") or "1").strip()
+            not in {"0", "false", "no"},
         )

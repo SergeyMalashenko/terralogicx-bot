@@ -93,10 +93,12 @@ class FakeMessage:
         self.status_messages: list[FakeSentMessage] = []
         self.documents: list[tuple[object, str | None]] = []
         self.document_kwargs: list[dict] = []
+        self.markups: list[object] = []
         self.markup_removed = False
 
     async def answer(self, text: str, **kwargs: object) -> FakeSentMessage:
         sent = FakeSentMessage(text)
+        self.markups.append(kwargs.get("reply_markup"))
         if text.startswith("⏳"):
             self.status_messages.append(sent)
         else:
@@ -751,6 +753,159 @@ async def test_report_limit_blocks_request(tmp_path):
     assert "(5 шт.)" in message.answers[0]
     assert client.calls == []
     assert message.documents == []
+
+
+# ---------------------------------------------------------------------------
+# Оплата пакетов (Robokassa)
+# ---------------------------------------------------------------------------
+
+
+def _paid_settings(tmp_path: Path) -> Settings:
+    return replace(
+        _settings(tmp_path),
+        robokassa_merchant_login="demo",
+        robokassa_password1="p1",
+        robokassa_password2="p2",
+        robokassa_test=True,
+    )
+
+
+def _exhausted_quota() -> QuotaStore:
+    quota = QuotaStore(":memory:")
+    for _ in range(5):
+        quota.record(42)
+    return quota
+
+
+async def test_paywall_offers_packages_when_payments_enabled(tmp_path):
+    """При включённых платежах лимит показывает пакеты, а не только поддержку."""
+    quota = _exhausted_quota()
+    router = build_router(
+        FakeClient(), _paid_settings(tmp_path), quota, payment_checker=None
+    )
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    assert len(message.answers) == 1
+    assert "Выберите пакет" in message.answers[0]
+
+
+async def test_paywall_keyboard_lists_packages(tmp_path):
+    quota = _exhausted_quota()
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    keyboard = message.markups[0]
+    texts = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert any("5 отчётов" in text for text in texts)
+    assert any("20 отчётов" in text for text in texts)
+    callbacks = [
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "pay:buy:pack5" in callbacks
+    assert "pay:buy:pack20" in callbacks
+
+
+async def test_pay_buy_creates_invoice_with_payment_link(tmp_path):
+    quota = _exhausted_quota()
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    query = FakeCallbackQuery("pay:buy:pack5", user_id=42)
+    await _callback_handler(router, "pay_buy")(query)
+
+    payment = quota.get_payment(1)
+    assert payment is not None
+    assert payment["user_id"] == 42
+    assert payment["reports"] == 5
+    invoice_message = query.message
+    assert invoice_message.answers  # текст счёта
+    keyboard = invoice_message.markups[0]
+    link_button = keyboard.inline_keyboard[0][0]
+    assert link_button.url.startswith("https://auth.robokassa.ru/Merchant/Index.aspx?")
+    assert "Shp_user_id=42" in link_button.url
+    check_button = keyboard.inline_keyboard[1][0]
+    assert check_button.callback_data == "pay:check:1"
+
+
+async def test_pay_check_paid_credits_reports(tmp_path):
+    quota = _exhausted_quota()
+    inv_id = quota.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+
+    async def fake_checker(inv: int) -> str:
+        return "paid"
+
+    router = build_router(
+        FakeClient(),
+        _paid_settings(tmp_path),
+        quota,
+        payment_checker=fake_checker,
+    )
+    query = FakeCallbackQuery(f"pay:check:{inv_id}", user_id=42)
+    await _callback_handler(router, "pay_check")(query)
+
+    assert quota.credits(42) == 5
+    assert quota.available(42, 5) == 5
+    assert any("Оплата получена" in text for text in query.message.answers)
+    # повторная проверка не начисляет дважды
+    query2 = FakeCallbackQuery(f"pay:check:{inv_id}", user_id=42)
+    await _callback_handler(router, "pay_check")(query2)
+    assert quota.credits(42) == 5
+
+
+async def test_pay_check_pending_keeps_waiting(tmp_path):
+    quota = _exhausted_quota()
+    inv_id = quota.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+
+    async def fake_checker(inv: int) -> str:
+        return "pending"
+
+    router = build_router(
+        FakeClient(),
+        _paid_settings(tmp_path),
+        quota,
+        payment_checker=fake_checker,
+    )
+    query = FakeCallbackQuery(f"pay:check:{inv_id}", user_id=42)
+    await _callback_handler(router, "pay_check")(query)
+
+    assert quota.credits(42) == 0
+    assert any("не подтверждён" in (text or "") for text in query.answered)
+
+
+async def test_pay_check_rejects_foreign_invoice(tmp_path):
+    quota = _exhausted_quota()
+    inv_id = quota.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+
+    async def fake_checker(inv: int) -> str:
+        return "paid"
+
+    router = build_router(
+        FakeClient(),
+        _paid_settings(tmp_path),
+        quota,
+        payment_checker=fake_checker,
+    )
+    query = FakeCallbackQuery(f"pay:check:{inv_id}", user_id=777)
+    await _callback_handler(router, "pay_check")(query)
+
+    assert quota.credits(42) == 0
+    assert query.answered == [None]
+
+
+async def test_paid_user_gets_report_after_purchase(tmp_path):
+    """После покупки пакета запрос снова идёт в backend и списывает кредит."""
+    quota = _exhausted_quota()
+    inv_id = quota.create_payment(42, package_code="pack5", reports=5, amount_rub=490.0)
+    quota.mark_payment_paid(inv_id)
+    client = FakeClient()
+    router = build_router(client, _paid_settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    await _wait_for(lambda: len(message.documents) == 1)
+    assert client.calls == [KN]
+    assert quota.credits(42) == 4
+    assert quota.used(42) == 5  # бесплатный счётчик не тронут
 
 
 async def test_successful_report_consumes_quota(tmp_path):
