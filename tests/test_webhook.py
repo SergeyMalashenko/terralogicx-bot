@@ -163,6 +163,19 @@ async def test_result_rejects_sum_mismatch(quota: QuotaStore) -> None:
     assert quota.get_payment(inv_id)["status"] == "pending"  # type: ignore[index]
 
 
+async def test_result_accepts_sum_without_decimals(quota: QuotaStore) -> None:
+    """Robokassa шлёт OutSum=3000 вместо 3000.00 — это не mismatch."""
+    inv_id = quota.create_payment(
+        111, package_code="report1", reports=1, amount_rub=3000.0
+    )
+    app = build_webhook_app(quota=quota, password2=PASSWORD2)
+    async with TestClient(TestServer(app)) as client:
+        status, body = await _post(client, _payload(inv_id, 111, out_sum="3000"))
+    assert status == 200
+    assert body == f"OK{inv_id}"
+    assert quota.credits(111) == 1
+
+
 async def test_result_rejects_malformed(quota: QuotaStore) -> None:
     app = build_webhook_app(quota=quota, password2=PASSWORD2)
     async with TestClient(TestServer(app)) as client:

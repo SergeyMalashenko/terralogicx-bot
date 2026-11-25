@@ -78,8 +78,16 @@ def build_webhook_app(
         if payment is None:
             LOGGER.warning("robokassa result: unknown invoice: inv=%s", inv_id)
             return web.Response(status=400, text="unknown invoice")
-        expected_sum = f"{float(payment['amount_rub']):.2f}"
-        if out_sum != expected_sum:
+        try:
+            received_sum = float(out_sum)
+        except ValueError:
+            LOGGER.warning(
+                "robokassa result: bad sum format: inv=%s sum=%r", inv_id, out_sum
+            )
+            return web.Response(status=400, text="bad sum")
+        expected_sum = float(payment["amount_rub"])
+        # Robokassa может прислать «3000» вместо «3000.00» — сравниваем числа
+        if abs(received_sum - expected_sum) > 0.005:
             LOGGER.warning(
                 "robokassa result: sum mismatch: inv=%s got=%s expected=%s",
                 inv_id,
