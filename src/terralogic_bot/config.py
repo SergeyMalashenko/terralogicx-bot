@@ -26,6 +26,7 @@ class Settings:
     robokassa_test: bool = True
     robokassa_webhook_host: str = "127.0.0.1"
     robokassa_webhook_port: int = 0
+    demo_report_path: str | None = None
 
     @property
     def payments_enabled(self) -> bool:
@@ -104,4 +105,5 @@ class Settings:
             robokassa_webhook_port=int(
                 (source.get("ROBOKASSA_WEBHOOK_PORT") or "0").strip() or "0"
             ),
+            demo_report_path=(source.get("DEMO_REPORT_PATH") or "").strip() or None,
         )

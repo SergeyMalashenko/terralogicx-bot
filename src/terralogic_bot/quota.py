@@ -168,6 +168,15 @@ class QuotaStore:
             "paid_at": row[7],
         }
 
+    def has_paid_payment(self, user_id: int) -> bool:
+        """Была ли у пользователя хотя бы одна оплаченная покупка."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM payments WHERE user_id = ? AND status = 'paid' LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
     def mark_payment_paid(self, inv_id: int) -> dict[str, object] | None:
         """Перевести счёт в 'paid' и начислить кредиты.
 

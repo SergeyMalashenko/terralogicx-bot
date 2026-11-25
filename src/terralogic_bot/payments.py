@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlencode
 
 LOGGER = logging.getLogger("terralogic_bot")
@@ -48,10 +48,15 @@ class PaymentPackage:
         return f"{self.price_rub:g} ₽"
 
 
-# Схема оплаты: после исчерпания бесплатного лимита каждый следующий
-# отчёт оплачивается отдельно.
+# Схема оплаты: после исчерпания бесплатного лимита первый платный отчёт
+# продаётся по промо-цене, последующие — по базовой.
+FIRST_REPORT_PRICE_RUB = 500.0
+REPORT_PRICE_RUB = 3000.0
+
 PACKAGES: tuple[PaymentPackage, ...] = (
-    PaymentPackage(code="report1", title="1 отчёт", reports=1, price_rub=3000.0),
+    PaymentPackage(
+        code="report1", title="1 отчёт", reports=1, price_rub=REPORT_PRICE_RUB
+    ),
 )
 
 _PACKAGES_BY_CODE = {package.code: package for package in PACKAGES}
@@ -59,6 +64,16 @@ _PACKAGES_BY_CODE = {package.code: package for package in PACKAGES}
 
 def get_package(code: str) -> PaymentPackage | None:
     return _PACKAGES_BY_CODE.get(code)
+
+
+def package_for_user(code: str, *, first_purchase: bool) -> PaymentPackage | None:
+    """Пакет с ценой для конкретного пользователя: первая покупка — промо-цена."""
+    package = get_package(code)
+    if package is None:
+        return None
+    if first_purchase:
+        return replace(package, price_rub=FIRST_REPORT_PRICE_RUB)
+    return package
 
 
 def build_payment_url(

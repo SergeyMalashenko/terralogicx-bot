@@ -11,6 +11,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -20,6 +21,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -48,7 +50,7 @@ from .payments import (
     PaymentRejected,
     build_payment_url,
     check_invoice,
-    get_package,
+    package_for_user,
 )
 from .quota import QuotaStore, remember_user
 from .support import support_start_button
@@ -64,16 +66,20 @@ START_TEXT = (
     "• Выявленные ограничения на строительство.\n"
     "• Предварительную оценку строительного потенциала.\n"
     "• Рекомендации по дополнительным проверкам.\n\n"
-    "🚀 Как получить отчёт:\n\n"
+    "📎 Ниже прикреплён пример отчёта для участка 50:33:0010516:820 — "
+    "посмотрите, каким будет результат.\n\n"
+    "🚀 Как получить свой отчёт:\n\n"
     "Отправьте кадастровый номер участка, например 50:29:0030502:979, "
     "ссылку на объявление Авито или координаты участка с карты, "
-    "например 55.488626, 38.009447.\n\n"
-    "Дождитесь завершения анализа.\n\n"
-    "Получите PDF-отчёт с результатами.\n\n"
+    "например 55.488626, 38.009447 — и дождитесь завершения анализа.\n\n"
+    "💳 Первые 3 отчёта — бесплатно. Далее первый платный отчёт — 500 ₽, "
+    "последующие — 3000 ₽.\n\n"
     "ℹ️ Важно: Анализ проводится на основе доступных данных и не является "
     "официальным подтверждением возможности строительства. При недостатке "
     "существенных сведений итоговая оценка может отсутствовать."
 )
+
+DEMO_REPORT_CAPTION = "Демо-отчёт: экспресс-оценка участка 50:33:0010516:820"
 
 HELP_TEXT = (
     "Отправьте кадастровый номер текстовым сообщением, ссылку на "
@@ -572,6 +578,30 @@ def render_progress(percent: float) -> str:
     return f"⏳ Формирую экспресс-оценку\n{bar} {int(bounded)}%"
 
 
+async def _send_demo_report(
+    message: Message, path: str | None, file_id_cache: dict[str, str]
+) -> None:
+    """Демо-отчёт к /start; после первой отправки используется file_id."""
+    if not path:
+        return
+    try:
+        cached = file_id_cache.get(path)
+        if cached is not None:
+            sent = await message.answer_document(cached, caption=DEMO_REPORT_CAPTION)
+        else:
+            if not Path(path).is_file():
+                LOGGER.warning("demo report not found: %s", path)
+                return
+            sent = await message.answer_document(
+                FSInputFile(path), caption=DEMO_REPORT_CAPTION
+            )
+        document = getattr(sent, "document", None)
+        if cached is None and document is not None:
+            file_id_cache[path] = document.file_id
+    except TelegramAPIError:
+        LOGGER.warning("demo report send failed: %s", path, exc_info=True)
+
+
 def build_router(
     client: TerraLogicClient,
     settings: Settings,
@@ -597,11 +627,13 @@ def build_router(
     router = Router(name="terralogicx-bot")
     semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
     jobs: dict[tuple[int, str], asyncio.Task] = {}
+    demo_file_ids: dict[str, str] = {}
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
         remember_user(quota, message.from_user)
         await message.answer(START_TEXT)
+        await _send_demo_report(message, settings.demo_report_path, demo_file_ids)
 
     @router.message(Command("help"))
     async def help_(message: Message) -> None:
@@ -680,6 +712,14 @@ def build_router(
         ):
             LOGGER.info("%s limit reached: user=%s", request_id, user_id)
             if settings.payments_enabled:
+                first = not quota.has_paid_payment(user_id)
+                priced = [
+                    package
+                    for package in (
+                        package_for_user(p.code, first_purchase=first) for p in PACKAGES
+                    )
+                    if package is not None
+                ]
                 buttons = [
                     [
                         InlineKeyboardButton(
@@ -687,13 +727,13 @@ def build_router(
                             callback_data=f"{_PAY_BUY_PREFIX}{package.code}",
                         )
                     ]
-                    for package in PACKAGES
+                    for package in priced
                 ]
                 buttons.append([support_start_button()])
                 await message.answer(
                     PAYWALL_TEXT.format(
                         limit=settings.report_limit,
-                        price=PACKAGES[0].price_label,
+                        price=priced[0].price_label,
                     ),
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
                 )
@@ -848,9 +888,16 @@ def build_router(
         if not settings.payments_enabled:
             await query.answer()
             return
-        package = get_package((query.data or "")[len(_PAY_BUY_PREFIX) :])
         user_id = query.from_user.id if query.from_user else None
-        if package is None or user_id is None:
+        if user_id is None:
+            await query.answer()
+            return
+        # цену определяем на сервере: первая покупка — промо-цена
+        package = package_for_user(
+            (query.data or "")[len(_PAY_BUY_PREFIX) :],
+            first_purchase=not quota.has_paid_payment(user_id),
+        )
+        if package is None:
             await query.answer()
             return
         inv_id = quota.create_payment(

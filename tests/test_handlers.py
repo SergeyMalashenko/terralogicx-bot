@@ -325,6 +325,31 @@ async def test_start(tmp_path):
     message = FakeMessage("/start")
     await _handler(router, "start")(message)
     assert message.answers == [START_TEXT]
+    assert message.documents == []  # без DEMO_REPORT_PATH вложения нет
+
+
+async def test_start_attaches_demo_report_when_configured(tmp_path):
+    demo = tmp_path / "demo.pdf"
+    demo.write_bytes(b"%PDF-1.4 demo")
+    settings = replace(_settings(tmp_path), demo_report_path=str(demo))
+    router = build_router(FakeClient(), settings)
+    message = FakeMessage("/start")
+    await _handler(router, "start")(message)
+    assert message.answers == [START_TEXT]
+    assert len(message.documents) == 1
+    _document, caption = message.documents[0]
+    assert caption is not None and "50:33:0010516:820" in caption
+
+
+async def test_start_missing_demo_file_sends_text_only(tmp_path):
+    settings = replace(
+        _settings(tmp_path), demo_report_path=str(tmp_path / "missing.pdf")
+    )
+    router = build_router(FakeClient(), settings)
+    message = FakeMessage("/start")
+    await _handler(router, "start")(message)
+    assert message.answers == [START_TEXT]
+    assert message.documents == []
 
 
 async def test_user_registered_in_quota_store(tmp_path):
@@ -790,13 +815,14 @@ async def test_paywall_offers_packages_when_payments_enabled(tmp_path):
 
 
 async def test_paywall_keyboard_lists_packages(tmp_path):
+    """Первому покупателю paywall предлагает промо-цену 500 ₽."""
     quota = _exhausted_quota()
     router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
     keyboard = message.markups[0]
     texts = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert any("1 отчёт" in text and "3000" in text for text in texts)
+    assert any("1 отчёт" in text and "500" in text for text in texts)
     callbacks = [
         button.callback_data
         for row in keyboard.inline_keyboard
@@ -806,7 +832,24 @@ async def test_paywall_keyboard_lists_packages(tmp_path):
     assert "pay:buy:report1" in callbacks
 
 
+async def test_paywall_offers_full_price_after_first_purchase(tmp_path):
+    """После первой оплаченной покупки цена — базовая 3000 ₽."""
+    quota = _exhausted_quota()
+    inv_id = quota.create_payment(
+        42, package_code="report1", reports=1, amount_rub=500.0
+    )
+    quota.mark_payment_paid(inv_id)
+    assert quota.consume(42, 3) == "paid"  # кредит израсходован → снова paywall
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+    keyboard = message.markups[0]
+    texts = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert any("1 отчёт" in text and "3000" in text for text in texts)
+
+
 async def test_pay_buy_creates_invoice_with_payment_link(tmp_path):
+    """Первая покупка выставляется по промо-цене 500 ₽."""
     quota = _exhausted_quota()
     router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
     query = FakeCallbackQuery("pay:buy:report1", user_id=42)
@@ -816,14 +859,34 @@ async def test_pay_buy_creates_invoice_with_payment_link(tmp_path):
     assert payment is not None
     assert payment["user_id"] == 42
     assert payment["reports"] == 1
+    assert payment["amount_rub"] == 500.0
     invoice_message = query.message
     assert invoice_message.answers  # текст счёта
     keyboard = invoice_message.markups[0]
     link_button = keyboard.inline_keyboard[0][0]
     assert link_button.url.startswith("https://auth.robokassa.ru/Merchant/Index.aspx?")
+    assert "OutSum=500.00" in link_button.url
     assert "Shp_user_id=42" in link_button.url
     check_button = keyboard.inline_keyboard[1][0]
     assert check_button.callback_data == "pay:check:1"
+
+
+async def test_pay_buy_second_purchase_uses_full_price(tmp_path):
+    """После оплаченной покупки счёт выставляется по базовой цене 3000 ₽."""
+    quota = _exhausted_quota()
+    first_inv = quota.create_payment(
+        42, package_code="report1", reports=1, amount_rub=500.0
+    )
+    quota.mark_payment_paid(first_inv)
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    query = FakeCallbackQuery("pay:buy:report1", user_id=42)
+    await _callback_handler(router, "pay_buy")(query)
+
+    payment = quota.get_payment(2)
+    assert payment is not None
+    assert payment["amount_rub"] == 3000.0
+    link_button = query.message.markups[0].inline_keyboard[0][0]
+    assert "OutSum=3000.00" in link_button.url
 
 
 async def test_pay_check_paid_credits_reports(tmp_path):

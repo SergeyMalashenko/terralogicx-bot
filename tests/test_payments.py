@@ -8,14 +8,34 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from terralogic_bot.payments import (
+    FIRST_REPORT_PRICE_RUB,
     PACKAGES,
+    REPORT_PRICE_RUB,
     PaymentRejected,
     build_payment_url,
     get_package,
+    package_for_user,
     parse_invoice_state,
 )
 
 PACKAGE = PACKAGES[0]
+
+
+def test_package_for_user_promo_price_on_first_purchase():
+    package = package_for_user("report1", first_purchase=True)
+    assert package is not None
+    assert package.price_rub == FIRST_REPORT_PRICE_RUB == 500.0
+    assert package.reports == 1
+
+
+def test_package_for_user_full_price_after_first_purchase():
+    package = package_for_user("report1", first_purchase=False)
+    assert package is not None
+    assert package.price_rub == REPORT_PRICE_RUB == 3000.0
+
+
+def test_package_for_user_unknown_code():
+    assert package_for_user("nope", first_purchase=True) is None
 
 
 def _payment_url(**overrides):

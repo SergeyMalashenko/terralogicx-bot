@@ -179,3 +179,16 @@ def test_consume_without_credits_falls_back_to_free(tmp_path):
     assert store.consume(42, 5) == "free"  # гонка/безлимит — минуса нет
     assert store.credits(42) == 0
     store.close()
+
+
+def test_has_paid_payment(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    assert store.has_paid_payment(42) is False
+    inv_id = store.create_payment(
+        42, package_code="report1", reports=1, amount_rub=500.0
+    )
+    assert store.has_paid_payment(42) is False  # ещё pending
+    store.mark_payment_paid(inv_id)
+    assert store.has_paid_payment(42) is True
+    assert store.has_paid_payment(43) is False  # другой пользователь
+    store.close()
