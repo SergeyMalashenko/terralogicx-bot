@@ -58,7 +58,7 @@ def test_settings_unlimited_users_from_env():
 
 def test_settings_quota_defaults():
     settings = Settings.from_env({"TELEGRAM_BOT_TOKEN": "t"})
-    assert settings.report_limit == 3
+    assert settings.report_limit == 0  # бесплатных отчётов нет
     assert settings.unlimited_user_ids == frozenset()
     assert settings.quota_db_path == "data/quota.sqlite3"
 

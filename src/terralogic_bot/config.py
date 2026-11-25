@@ -17,7 +17,7 @@ class Settings:
     support_group_id: int | None = None
     support_session_ttl_s: float = 3600.0
     support_db_path: str = "data/support.sqlite3"
-    report_limit: int = 3
+    report_limit: int = 0
     unlimited_user_ids: frozenset[int] = frozenset()
     quota_db_path: str = "data/quota.sqlite3"
     robokassa_merchant_login: str | None = None
@@ -86,7 +86,7 @@ class Settings:
             support_group_id=support_group_id,
             support_session_ttl_s=float(source.get("SUPPORT_SESSION_TTL_S", "3600")),
             support_db_path=source.get("SUPPORT_DB_PATH", "data/support.sqlite3"),
-            report_limit=int(source.get("REPORT_LIMIT", "3")),
+            report_limit=int(source.get("REPORT_LIMIT", "0")),
             unlimited_user_ids=frozenset(unlimited_user_ids),
             quota_db_path=source.get("QUOTA_DB_PATH", "data/quota.sqlite3"),
             robokassa_merchant_login=(

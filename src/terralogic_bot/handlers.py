@@ -72,8 +72,7 @@ START_TEXT = (
     "Отправьте кадастровый номер участка, например 50:29:0030502:979, "
     "ссылку на объявление Авито или координаты участка с карты, "
     "например 55.488626, 38.009447 — и дождитесь завершения анализа.\n\n"
-    "💳 Первые 3 отчёта — бесплатно. Далее первый платный отчёт — 500 ₽, "
-    "последующие — 3000 ₽.\n\n"
+    "💳 Первый отчёт — 500 ₽, последующие — 3000 ₽.\n\n"
     "ℹ️ Важно: Анализ проводится на основе доступных данных и не является "
     "официальным подтверждением возможности строительства. При недостатке "
     "существенных сведений итоговая оценка может отсутствовать."
@@ -114,15 +113,17 @@ COORDS_FAILED_TEXT = (
 )
 
 LIMIT_REACHED_TEXT = (
-    "Вы использовали все бесплатные отчёты ({limit} шт.).\n\n"
-    "Чтобы продолжить пользоваться сервисом, напишите в поддержку — "
-    "обсудим условия."
+    "Покупка отчётов временно недоступна.\n\nНапишите в поддержку — обсудим условия."
+)
+
+PAYWALL_FIRST_TEXT = (
+    "Первый отчёт — {price} по промо-цене, каждый следующий — 3000 ₽.\n\n"
+    "Для оплаты нажмите кнопку ниже — или напишите в поддержку."
 )
 
 PAYWALL_TEXT = (
-    "Вы использовали все бесплатные отчёты ({limit} шт.).\n\n"
-    "Каждый следующий отчёт — {price}. Для оплаты нажмите кнопку ниже "
-    "— или напишите в поддержку."
+    "Каждый следующий отчёт — {price}.\n\n"
+    "Для оплаты нажмите кнопку ниже — или напишите в поддержку."
 )
 
 PAY_INVOICE_TEXT = (
@@ -730,16 +731,14 @@ def build_router(
                     for package in priced
                 ]
                 buttons.append([support_start_button()])
+                paywall_text = PAYWALL_FIRST_TEXT if first else PAYWALL_TEXT
                 await message.answer(
-                    PAYWALL_TEXT.format(
-                        limit=settings.report_limit,
-                        price=priced[0].price_label,
-                    ),
+                    paywall_text.format(price=priced[0].price_label),
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
                 )
             else:
                 await message.answer(
-                    LIMIT_REACHED_TEXT.format(limit=settings.report_limit),
+                    LIMIT_REACHED_TEXT,
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[[support_start_button()]]
                     ),

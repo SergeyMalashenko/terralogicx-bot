@@ -302,6 +302,7 @@ def _settings(tmp_path: Path, max_concurrent: int = 2) -> Settings:
         request_timeout_s=5.0,
         max_concurrent_reports=max_concurrent,
         log_level="DEBUG",
+        report_limit=3,  # в бою 0; здесь проверяем механику квоты
     )
 
 
@@ -774,8 +775,7 @@ async def test_report_limit_blocks_request(tmp_path):
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
     assert len(message.answers) == 1
-    assert "все бесплатные отчёты" in message.answers[0]
-    assert "(3 шт.)" in message.answers[0]
+    assert "временно недоступна" in message.answers[0]
     assert client.calls == []
     assert message.documents == []
 
@@ -803,7 +803,7 @@ def _exhausted_quota() -> QuotaStore:
 
 
 async def test_paywall_offers_packages_when_payments_enabled(tmp_path):
-    """При включённых платежах лимит показывает пакеты, а не только поддержку."""
+    """Первому покупателю paywall показывает промо-текст с пакетами."""
     quota = _exhausted_quota()
     router = build_router(
         FakeClient(), _paid_settings(tmp_path), quota, payment_checker=None
@@ -811,7 +811,8 @@ async def test_paywall_offers_packages_when_payments_enabled(tmp_path):
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
     assert len(message.answers) == 1
-    assert "Каждый следующий отчёт" in message.answers[0]
+    assert "Первый отчёт" in message.answers[0]
+    assert "промо-цене" in message.answers[0]
 
 
 async def test_paywall_keyboard_lists_packages(tmp_path):
@@ -843,6 +844,7 @@ async def test_paywall_offers_full_price_after_first_purchase(tmp_path):
     router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
+    assert "Каждый следующий отчёт" in message.answers[0]
     keyboard = message.markups[0]
     texts = [button.text for row in keyboard.inline_keyboard for button in row]
     assert any("1 отчёт" in text and "3000" in text for text in texts)
@@ -1026,7 +1028,7 @@ async def test_quota_is_checked_before_duplicate_guard(tmp_path):
         message = FakeMessage(KN)
         await _handler(router, "cadastral")(message)
         assert len(message.answers) == 1
-        assert "все бесплатные отчёты" in message.answers[0]
+        assert "временно недоступна" in message.answers[0]
 
 
 # --- прогресс запроса: статусное сообщение, тикер, очистка ---
