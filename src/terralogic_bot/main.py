@@ -37,9 +37,28 @@ async def _run(settings: Settings) -> None:
     sweeper = asyncio.create_task(
         support_sweeper(bot, support_store, settings.support_session_ttl_s)
     )
+    webhook_runner = None
+    if settings.webhook_enabled:
+        from .handlers import PAY_PAID_TEXT
+        from .webhook import build_webhook_app, start_webhook
+
+        async def notify_paid(user_id: int, reports: int) -> None:
+            await bot.send_message(user_id, PAY_PAID_TEXT.format(reports=reports))
+
+        webhook_runner = await start_webhook(
+            build_webhook_app(
+                quota=quota_store,
+                password2=settings.robokassa_password2 or "",
+                notify=notify_paid,
+            ),
+            host=settings.robokassa_webhook_host,
+            port=settings.robokassa_webhook_port,
+        )
     try:
         await dispatcher.start_polling(bot)
     finally:
+        if webhook_runner is not None:
+            await webhook_runner.cleanup()
         sweeper.cancel()
         support_store.close()
         quota_store.close()

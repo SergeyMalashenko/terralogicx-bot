@@ -121,7 +121,8 @@ PAYWALL_TEXT = (
 
 PAY_INVOICE_TEXT = (
     "Счёт на {title} — {price}.\n\n"
-    "Оплатите по кнопке ниже, затем нажмите «Проверить оплату»."
+    "Оплатите по кнопке ниже — подтверждение придёт автоматически. "
+    "Если сообщения долго нет, нажмите «Проверить оплату»."
 )
 
 PAY_PAID_TEXT = (
@@ -141,6 +142,8 @@ PAY_CANCELLED_TEXT = (
 )
 
 PAY_FAILED_TEXT = "Не удалось проверить оплату.\n\nПопробуйте ещё раз чуть позже."
+
+PAY_ALREADY_TEXT = "Оплата уже подтверждена — отчёты начислены ✅"
 
 _PAY_BUY_PREFIX = "pay:buy:"
 _PAY_CHECK_PREFIX = "pay:check:"
@@ -905,7 +908,7 @@ def build_router(
             await query.answer()
             return
         if payment["status"] == "paid":
-            await query.answer("Этот счёт уже зачтён.")
+            await query.answer(PAY_ALREADY_TEXT)
             return
         try:
             assert payment_checker is not None  # следует из payments_enabled
@@ -927,8 +930,8 @@ def build_router(
                 await query.message.answer(
                     PAY_PAID_TEXT.format(reports=paid["reports"])
                 )
-            else:  # параллельный клик уже зачли
-                await query.answer("Этот счёт уже зачтён.")
+            else:  # параллельный клик или webhook уже зачли
+                await query.answer(PAY_ALREADY_TEXT)
             return
         if state == "cancelled":
             await query.answer(PAY_CANCELLED_TEXT)

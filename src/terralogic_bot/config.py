@@ -24,6 +24,8 @@ class Settings:
     robokassa_password1: str | None = None
     robokassa_password2: str | None = None
     robokassa_test: bool = True
+    robokassa_webhook_host: str = "127.0.0.1"
+    robokassa_webhook_port: int = 0
 
     @property
     def payments_enabled(self) -> bool:
@@ -32,6 +34,10 @@ class Settings:
             and self.robokassa_password1
             and self.robokassa_password2
         )
+
+    @property
+    def webhook_enabled(self) -> bool:
+        return self.payments_enabled and self.robokassa_webhook_port > 0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
@@ -92,4 +98,10 @@ class Settings:
             or None,
             robokassa_test=(source.get("ROBOKASSA_TEST", "1") or "1").strip()
             not in {"0", "false", "no"},
+            robokassa_webhook_host=(
+                source.get("ROBOKASSA_WEBHOOK_HOST") or "127.0.0.1"
+            ).strip(),
+            robokassa_webhook_port=int(
+                (source.get("ROBOKASSA_WEBHOOK_PORT") or "0").strip() or "0"
+            ),
         )
