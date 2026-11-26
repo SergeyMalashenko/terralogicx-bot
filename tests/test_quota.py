@@ -192,3 +192,92 @@ def test_has_paid_payment(tmp_path):
     assert store.has_paid_payment(42) is True
     assert store.has_paid_payment(43) is False  # другой пользователь
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Заказ: предмет, версия оферты, редакции оферты
+# ---------------------------------------------------------------------------
+
+
+def test_payment_stores_subject_and_offer_version(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    inv_id = store.create_payment(
+        42,
+        package_code="report1",
+        reports=1,
+        amount_rub=3000.0,
+        subject_kind="cadastral",
+        subject="50:21:0030210:123",
+        offer_version="2026-11-26",
+    )
+    payment = store.get_payment(inv_id)
+    assert payment["subject_kind"] == "cadastral"
+    assert payment["subject"] == "50:21:0030210:123"
+    assert payment["offer_version"] == "2026-11-26"
+    store.close()
+
+
+def test_payment_without_subject_keeps_nullable_fields(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    inv_id = store.create_payment(
+        42, package_code="report1", reports=1, amount_rub=3000.0
+    )
+    payment = store.get_payment(inv_id)
+    assert payment["subject_kind"] is None
+    assert payment["subject"] is None
+    assert payment["offer_version"] is None
+    store.close()
+
+
+def test_payments_migrated_from_old_schema(tmp_path):
+    """БД старой схемы (без предмета заказа) докатывается без потери строк."""
+    import sqlite3
+
+    path = tmp_path / "quota.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE payments ("
+        "inv_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, "
+        "package_code TEXT NOT NULL, reports INTEGER NOT NULL, "
+        "amount_rub REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+        "created_at REAL NOT NULL, paid_at REAL)"
+    )
+    conn.execute(
+        "INSERT INTO payments (inv_id, user_id, package_code, reports, "
+        "amount_rub, status, created_at) VALUES (1, 42, 'report1', 1, "
+        "3000.0, 'paid', 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = QuotaStore(path)  # открытие выполняет миграцию
+    payment = store.get_payment(1)
+    assert payment["user_id"] == 42
+    assert payment["status"] == "paid"
+    assert payment["subject"] is None
+    # новые счета уже с предметом
+    inv_id = store.create_payment(
+        7,
+        package_code="report1",
+        reports=1,
+        amount_rub=500.0,
+        subject_kind="cadastral",
+        subject="50:21:0030210:123",
+        offer_version="2026-11-26",
+    )
+    assert store.get_payment(inv_id)["subject"] == "50:21:0030210:123"
+    store.close()
+
+
+def test_offer_versions_registered_once_and_readable(tmp_path):
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    store.register_offer_version("2026-11-26", "текст редакции v1")
+    store.register_offer_version("2026-11-26", "подменённый текст")
+    store.register_offer_version("2026-12-01", "текст редакции v2")
+
+    # первая редакция не перезаписывается: условия старых заказов сохраняются
+    assert store.offer_text("2026-11-26") == "текст редакции v1"
+    assert store.offer_text("2026-12-01") == "текст редакции v2"
+    assert store.offer_text("2099-01-01") is None
+    assert store.list_offer_versions() == ["2026-11-26", "2026-12-01"]
+    store.close()

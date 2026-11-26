@@ -27,6 +27,10 @@ class Settings:
     robokassa_webhook_host: str = "127.0.0.1"
     robokassa_webhook_port: int = 0
     demo_report_path: str | None = None
+    offer_url: str | None = None
+    privacy_url: str | None = None
+    offer_version: str | None = None
+    offer_text_path: str = "assets/TerraLogicX_Public_Offer.md"
 
     @property
     def payments_enabled(self) -> bool:
@@ -106,4 +110,11 @@ class Settings:
                 (source.get("ROBOKASSA_WEBHOOK_PORT") or "0").strip() or "0"
             ),
             demo_report_path=(source.get("DEMO_REPORT_PATH") or "").strip() or None,
+            offer_url=(source.get("OFFER_URL") or "").strip() or None,
+            privacy_url=(source.get("PRIVACY_URL") or "").strip() or None,
+            offer_version=(source.get("OFFER_VERSION") or "").strip() or None,
+            offer_text_path=(
+                source.get("OFFER_TEXT_PATH")
+                or "assets/TerraLogicX_Public_Offer.md"
+            ).strip(),
         )

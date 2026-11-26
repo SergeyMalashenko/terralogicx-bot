@@ -40,13 +40,31 @@ CREATE TABLE IF NOT EXISTS payments (
     amount_rub REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at REAL NOT NULL,
-    paid_at REAL
+    paid_at REAL,
+    subject_kind TEXT,
+    subject TEXT,
+    offer_version TEXT
 );
 CREATE TABLE IF NOT EXISTS report_credits (
     user_id INTEGER PRIMARY KEY,
     credits INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS offer_versions (
+    version TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    created_at REAL NOT NULL
 )
 """
+
+# Колонки заказа, добавленные после первого релиза платежей: предмет заказа
+# (что именно заказано — кадастровый номер, ссылка или координаты) и версия
+# редакции оферты, показанной в карточке. Докатываются ALTER TABLE'ом,
+# чтобы существующие БД обновлялись без потери истории платежей.
+_PAYMENTS_EXTRA_COLUMNS = (
+    ("subject_kind", "TEXT"),
+    ("subject", "TEXT"),
+    ("offer_version", "TEXT"),
+)
 
 
 class QuotaStore:
@@ -60,6 +78,16 @@ class QuotaStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            existing = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(payments)")
+            }
+            for name, ddl in _PAYMENTS_EXTRA_COLUMNS:
+                if name not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE payments ADD COLUMN {name} {ddl}"
+                    )
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -132,8 +160,17 @@ class QuotaStore:
         package_code: str,
         reports: int,
         amount_rub: float,
+        subject_kind: str | None = None,
+        subject: str | None = None,
+        offer_version: str | None = None,
     ) -> int:
-        """Зарегистрировать новый счёт; вернуть его inv_id (монотонный)."""
+        """Зарегистрировать новый счёт; вернуть его inv_id (монотонный).
+
+        subject_kind/subject — предмет заказа из карточки: 'cadastral' |
+        'listing' | 'coords' и сам номер, ссылка или координаты. По нему
+        после подтверждения оплаты отчёт запускается автоматически.
+        offer_version — редакция оферты, показанная пользователю в заказе.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT COALESCE(MAX(inv_id), 0) FROM payments"
@@ -142,8 +179,19 @@ class QuotaStore:
             self._conn.execute(
                 "INSERT INTO payments "
                 "(inv_id, user_id, package_code, reports, amount_rub, "
-                " status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                (inv_id, user_id, package_code, reports, amount_rub, time.time()),
+                " status, created_at, subject_kind, subject, offer_version) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                (
+                    inv_id,
+                    user_id,
+                    package_code,
+                    reports,
+                    amount_rub,
+                    time.time(),
+                    subject_kind,
+                    subject,
+                    offer_version,
+                ),
             )
             self._conn.commit()
         return inv_id
@@ -152,7 +200,8 @@ class QuotaStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT inv_id, user_id, package_code, reports, amount_rub, "
-                "status, created_at, paid_at FROM payments WHERE inv_id = ?",
+                "status, created_at, paid_at, subject_kind, subject, "
+                "offer_version FROM payments WHERE inv_id = ?",
                 (inv_id,),
             ).fetchone()
         if row is None:
@@ -166,7 +215,40 @@ class QuotaStore:
             "status": row[5],
             "created_at": row[6],
             "paid_at": row[7],
+            "subject_kind": row[8],
+            "subject": row[9],
+            "offer_version": row[10],
         }
+
+    def register_offer_version(self, version: str, text: str) -> None:
+        """Сохранить редакцию оферты целиком (идемпотентно по версии).
+
+        Условия уже показанных заказов должны восстанавливаться по версии,
+        поэтому однажды записанная редакция не перезаписывается.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO offer_versions (version, text, created_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(version) DO NOTHING",
+                (version, text, time.time()),
+            )
+            self._conn.commit()
+
+    def offer_text(self, version: str) -> str | None:
+        """Текст редакции оферты по её версии (None, если не регистрировалась)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text FROM offer_versions WHERE version = ?", (version,)
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def list_offer_versions(self) -> list[str]:
+        """Все зарегистрированные версии оферты в порядке добавления."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT version FROM offer_versions ORDER BY created_at"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def has_paid_payment(self, user_id: int) -> bool:
         """Была ли у пользователя хотя бы одна оплаченная покупка."""

@@ -93,10 +93,10 @@ async def test_result_credits_reports_and_notifies(quota: QuotaStore) -> None:
     inv_id = quota.create_payment(
         111, package_code="report1", reports=1, amount_rub=3000.0
     )
-    notified: list[tuple[int, int]] = []
+    notified: list[dict] = []
 
-    async def notify(user_id: int, reports: int) -> None:
-        notified.append((user_id, reports))
+    async def notify(payment: dict) -> None:
+        notified.append(dict(payment))
 
     app = build_webhook_app(quota=quota, password2=PASSWORD2, notify=notify)
     async with TestClient(TestServer(app)) as client:
@@ -105,7 +105,9 @@ async def test_result_credits_reports_and_notifies(quota: QuotaStore) -> None:
     assert body == f"OK{inv_id}"
     assert quota.credits(111) == 1
     assert quota.get_payment(inv_id)["status"] == "paid"  # type: ignore[index]
-    assert notified == [(111, 1)]
+    assert len(notified) == 1
+    assert notified[0]["user_id"] == 111
+    assert notified[0]["inv_id"] == inv_id
 
 
 async def test_result_idempotent_second_call_notifies_once(
@@ -116,7 +118,7 @@ async def test_result_idempotent_second_call_notifies_once(
     )
     calls = 0
 
-    async def notify(user_id: int, reports: int) -> None:
+    async def notify(payment: dict) -> None:
         nonlocal calls
         calls += 1
 
@@ -188,7 +190,7 @@ async def test_result_notify_failure_still_ok(quota: QuotaStore) -> None:
         111, package_code="report1", reports=1, amount_rub=3000.0
     )
 
-    async def notify(user_id: int, reports: int) -> None:
+    async def notify(payment: dict) -> None:
         raise RuntimeError("telegram недоступен")
 
     app = build_webhook_app(quota=quota, password2=PASSWORD2, notify=notify)

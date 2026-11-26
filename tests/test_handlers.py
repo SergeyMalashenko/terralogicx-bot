@@ -31,8 +31,10 @@ from terralogic_bot.handlers import (
     START_TEXT,
     STATUS_USAGE_TEXT,
     UNAVAILABLE_TEXT,
+    ReportService,
     _report_job,
     build_router,
+    fulfill_paid_order,
     render_progress,
     report_filename,
 )
@@ -802,93 +804,153 @@ def _exhausted_quota() -> QuotaStore:
     return quota
 
 
-async def test_paywall_offers_packages_when_payments_enabled(tmp_path):
-    """Первому покупателю paywall показывает промо-текст с пакетами."""
+async def test_order_card_shown_when_limit_exhausted(tmp_path):
+    """Карточка заказа: предмет, промо-цена, сроки, оферта и политика."""
     quota = _exhausted_quota()
-    router = build_router(
-        FakeClient(), _paid_settings(tmp_path), quota, payment_checker=None
+    settings = replace(
+        _paid_settings(tmp_path),
+        offer_url="https://telegra.ph/offer",
+        privacy_url="https://telegra.ph/privacy",
     )
+    router = build_router(FakeClient(), settings, quota)
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
+
     assert len(message.answers) == 1
-    assert "Первый отчёт" in message.answers[0]
-    assert "промо-цене" in message.answers[0]
+    card = message.answers[0]
+    assert "Экспресс-проверка земельного участка" in card
+    assert KN in card
+    assert "500 ₽" in card
+    assert "промо-цен" in card
+    assert "10 минут" in card
+    assert "15 минут" in card
+    assert "Публичной оферты" in card
+
+    keyboard = message.markups[0]
+    pay_button = keyboard.inline_keyboard[0][0]
+    assert pay_button.url.startswith(
+        "https://auth.robokassa.ru/Merchant/Index.aspx?"
+    )
+    assert "OutSum=500.00" in pay_button.url
+    assert "Shp_user_id=42" in pay_button.url
+    actions_row = keyboard.inline_keyboard[1]
+    assert actions_row[0].callback_data == "order:change:1"
+    assert actions_row[1].callback_data == "pay:check:1"
+    docs_row = keyboard.inline_keyboard[2]
+    assert docs_row[0].url == "https://telegra.ph/offer"
+    assert docs_row[1].url == "https://telegra.ph/privacy"
+
+    payment = quota.get_payment(1)
+    assert payment is not None
+    assert payment["user_id"] == 42
+    assert payment["amount_rub"] == 500.0
+    assert payment["subject_kind"] == "cadastral"
+    assert payment["subject"] == KN
+    assert payment["offer_version"]
 
 
-async def test_paywall_keyboard_lists_packages(tmp_path):
-    """Первому покупателю paywall предлагает промо-цену 500 ₽."""
+async def test_order_card_without_doc_urls_omits_doc_row(tmp_path):
+    """Без настроенных URL оферта/политика в клавиатуре не показываются."""
     quota = _exhausted_quota()
     router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
     keyboard = message.markups[0]
-    texts = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert any("1 отчёт" in text and "500" in text for text in texts)
-    callbacks = [
-        button.callback_data
-        for row in keyboard.inline_keyboard
-        for button in row
-        if button.callback_data
-    ]
-    assert "pay:buy:report1" in callbacks
+    assert len(keyboard.inline_keyboard) == 2
 
 
-async def test_paywall_offers_full_price_after_first_purchase(tmp_path):
-    """После первой оплаченной покупки цена — базовая 3000 ₽."""
+async def test_order_card_full_price_after_first_purchase(tmp_path):
+    """После первой оплаченной покупки карточка — по базовой цене 3000 ₽."""
     quota = _exhausted_quota()
     inv_id = quota.create_payment(
         42, package_code="report1", reports=1, amount_rub=500.0
     )
     quota.mark_payment_paid(inv_id)
-    assert quota.consume(42, 3) == "paid"  # кредит израсходован → снова paywall
+    assert quota.consume(42, 3) == "paid"  # кредит израсходован → снова заказ
     router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
     message = FakeMessage(KN)
     await _handler(router, "cadastral")(message)
-    assert "Каждый следующий отчёт" in message.answers[0]
-    keyboard = message.markups[0]
-    texts = [button.text for row in keyboard.inline_keyboard for button in row]
-    assert any("1 отчёт" in text and "3000" in text for text in texts)
 
-
-async def test_pay_buy_creates_invoice_with_payment_link(tmp_path):
-    """Первая покупка выставляется по промо-цене 500 ₽."""
-    quota = _exhausted_quota()
-    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
-    query = FakeCallbackQuery("pay:buy:report1", user_id=42)
-    await _callback_handler(router, "pay_buy")(query)
-
-    payment = quota.get_payment(1)
-    assert payment is not None
-    assert payment["user_id"] == 42
-    assert payment["reports"] == 1
-    assert payment["amount_rub"] == 500.0
-    invoice_message = query.message
-    assert invoice_message.answers  # текст счёта
-    keyboard = invoice_message.markups[0]
-    link_button = keyboard.inline_keyboard[0][0]
-    assert link_button.url.startswith("https://auth.robokassa.ru/Merchant/Index.aspx?")
-    assert "OutSum=500.00" in link_button.url
-    assert "Shp_user_id=42" in link_button.url
-    check_button = keyboard.inline_keyboard[1][0]
-    assert check_button.callback_data == "pay:check:1"
-
-
-async def test_pay_buy_second_purchase_uses_full_price(tmp_path):
-    """После оплаченной покупки счёт выставляется по базовой цене 3000 ₽."""
-    quota = _exhausted_quota()
-    first_inv = quota.create_payment(
-        42, package_code="report1", reports=1, amount_rub=500.0
-    )
-    quota.mark_payment_paid(first_inv)
-    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
-    query = FakeCallbackQuery("pay:buy:report1", user_id=42)
-    await _callback_handler(router, "pay_buy")(query)
-
+    card = message.answers[0]
+    assert "3000 ₽" in card
+    assert "промо" not in card
     payment = quota.get_payment(2)
     assert payment is not None
     assert payment["amount_rub"] == 3000.0
-    link_button = query.message.markups[0].inline_keyboard[0][0]
-    assert "OutSum=3000.00" in link_button.url
+
+
+async def test_order_card_for_listing_url(tmp_path):
+    """Ссылка на объявление: предмет заказа — сама ссылка, подпись без URL."""
+    quota = _exhausted_quota()
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    message = FakeMessage(LISTING_URL)
+    await _handler(router, "cadastral")(message)
+
+    card = message.answers[0]
+    assert "по ссылке на объявление" in card
+    assert LISTING_URL not in card  # длинный URL в карточке не показываем
+    payment = quota.get_payment(1)
+    assert payment is not None
+    assert payment["subject_kind"] == "listing"
+    assert payment["subject"] == LISTING_URL
+
+
+async def test_order_change_removes_keyboard_and_prompts_new_subject(tmp_path):
+    """«Изменить участок»: клавиатура снята, пользователь ждёт новый ввод."""
+    quota = _exhausted_quota()
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+
+    query = FakeCallbackQuery("order:change:1", user_id=42)
+    await _callback_handler(router, "order_change")(query)
+    assert query.answered == [None]
+    assert query.message.markup_removed is True
+    assert any("Заказ отменён" in text for text in query.message.answers)
+
+    # счёт остаётся pending: оплата после отмены всё равно исполнит заказ
+    assert quota.get_payment(1)["status"] == "pending"  # type: ignore[index]
+
+
+async def test_order_change_rejects_foreign_invoice(tmp_path):
+    """Чужую карточку заказа отменить нельзя."""
+    quota = _exhausted_quota()
+    router = build_router(FakeClient(), _paid_settings(tmp_path), quota)
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)
+
+    query = FakeCallbackQuery("order:change:1", user_id=777)
+    await _callback_handler(router, "order_change")(query)
+    assert query.answered == [None]
+    assert query.message.markup_removed is False
+    assert query.message.answers == []
+
+
+async def test_pay_check_paid_with_subject_starts_report(tmp_path):
+    """Подтверждённая оплата заказа с предметом запускает отчёт автоматически."""
+    quota = _exhausted_quota()
+    client = FakeClient()
+
+    async def fake_checker(inv: int) -> str:
+        return "paid"
+
+    router = build_router(
+        client, _paid_settings(tmp_path), quota, payment_checker=fake_checker
+    )
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)  # карточка создала заказ inv=1
+
+    query = FakeCallbackQuery("pay:check:1", user_id=42)
+    await _callback_handler(router, "pay_check")(query)
+    await _wait_for(lambda: len(query.message.documents) == 1)
+
+    assert client.calls == [KN]
+    assert any("Оплата получена" in text for text in query.message.answers)
+    document, caption = query.message.documents[0]
+    assert document.filename == "TerraLogicX_50-21-0030210-123.pdf"
+    assert caption == f"Экспресс-оценка участка\n{KN}"
+    # кредит за заказ начислен и тут же израсходован запущенным отчётом
+    assert quota.credits(42) == 0
 
 
 async def test_pay_check_paid_credits_reports(tmp_path):
@@ -960,6 +1022,57 @@ async def test_pay_check_rejects_foreign_invoice(tmp_path):
 
     assert quota.credits(42) == 0
     assert query.answered == [None]
+
+
+async def test_fulfill_paid_order_starts_report_via_sender(tmp_path):
+    """Webhook-путь: оплаченный заказ с предметом запускает отчёт через sender."""
+    quota = QuotaStore(":memory:")
+    client = FakeClient()
+    service = ReportService(client, _paid_settings(tmp_path), quota)
+    inv_id = quota.create_payment(
+        42,
+        package_code="report1",
+        reports=1,
+        amount_rub=3000.0,
+        subject_kind="cadastral",
+        subject=KN,
+        offer_version="2026-11-26",
+    )
+    paid = quota.mark_payment_paid(inv_id)
+    assert paid is not None
+
+    message = FakeMessage(None, user_id=42)
+    fulfilled = await fulfill_paid_order(payment=paid, service=service, sender=message)
+    assert fulfilled is True
+    await _wait_for(lambda: len(message.documents) == 1)
+
+    assert client.calls == [KN]
+    assert message.answers[0].startswith("Оплата получена")
+    assert KN in message.answers[0]
+    document, caption = message.documents[0]
+    assert document.filename == "TerraLogicX_50-21-0030210-123.pdf"
+    assert caption == f"Экспресс-оценка участка\n{KN}"
+    # отчёт списал доступный остаток (здесь — бесплатный лимит тестовых
+    # настроек; списание кредита покрывает test_pay_check_..._starts_report)
+    assert quota.used(42) == 1
+
+
+async def test_fulfill_paid_order_without_subject_keeps_credit(tmp_path):
+    """Счёт без предмета (старая схема): автозапуска нет, кредит сохраняется."""
+    quota = QuotaStore(":memory:")
+    inv_id = quota.create_payment(
+        42, package_code="report1", reports=1, amount_rub=3000.0
+    )
+    paid = quota.mark_payment_paid(inv_id)
+    assert paid is not None
+
+    client = FakeClient()
+    service = ReportService(client, _paid_settings(tmp_path), quota)
+    message = FakeMessage(None, user_id=42)
+    fulfilled = await fulfill_paid_order(payment=paid, service=service, sender=message)
+    assert fulfilled is False
+    assert client.calls == []
+    assert quota.credits(42) == 1
 
 
 async def test_paid_user_gets_report_after_purchase(tmp_path):

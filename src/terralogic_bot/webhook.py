@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
 from aiohttp import web
 
@@ -24,8 +25,9 @@ LOGGER = logging.getLogger("terralogic_bot")
 
 RESULT_PATH = "/robokassa/result"
 
-# notify(user_id, reports) — сообщить пользователю о зачислении пакета.
-NotifyFn = Callable[[int, int], Awaitable[None]]
+# notify(payment) — оплаченный счёт целиком: пользователь, сумма, предмет
+# заказа. Вызывается один раз на счёт (первое успешное зачисление).
+NotifyFn = Callable[[Mapping[str, Any]], Awaitable[None]]
 
 
 def verify_result_signature(
@@ -107,7 +109,7 @@ def build_webhook_app(
             )
             if notify is not None:
                 try:
-                    await notify(int(paid["user_id"]), int(paid["reports"]))
+                    await notify(paid)
                 except Exception:  # уведомление не должно ломать ответ Robokassa
                     LOGGER.exception("robokassa result: notify failed: inv=%s", inv_id)
         return web.Response(text=f"OK{inv_id}")

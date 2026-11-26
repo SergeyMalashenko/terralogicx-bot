@@ -74,6 +74,18 @@ def test_payment_url_description_mentions_package():
     assert PACKAGE.title in query["Description"][0]
 
 
+def test_payment_url_custom_description_with_cadastral():
+    """Назначение платежа с предметом заказа; лимит Robokassa — 100 символов."""
+    url = _payment_url(
+        description="TerraLogicX: экспресс-проверка участка — 50:21:0030210:123"
+    )
+    query = parse_qs(urlparse(url).query)
+    assert "50:21:0030210:123" in query["Description"][0]
+    long_url = _payment_url(description="x" * 200)
+    long_query = parse_qs(urlparse(long_url).query)
+    assert len(long_query["Description"][0]) == 100
+
+
 def test_get_package_lookup():
     assert get_package("report1") is PACKAGES[0]
     assert get_package("nope") is None

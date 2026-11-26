@@ -84,10 +84,13 @@ def build_payment_url(
     package: PaymentPackage,
     user_id: int,
     test: bool,
+    description: str | None = None,
 ) -> str:
     """Подписанная ссылка на платёжную страницу Robokassa.
 
     Подпись: MD5(MerchantLogin:OutSum:InvId:Пароль#1:Shp_user_id=<id>).
+    description — назначение платежа (видно плательщику и в чеке),
+    Robokassa ограничивает его 100 символами.
     """
     out_sum = f"{package.price_rub:.2f}"
     shp = {"Shp_user_id": str(user_id)}
@@ -100,7 +103,7 @@ def build_payment_url(
         "MerchantLogin": merchant_login,
         "OutSum": out_sum,
         "InvId": inv_id,
-        "Description": f"TerraLogicX: {package.title}",
+        "Description": (description or f"TerraLogicX: {package.title}")[:100],
         "SignatureValue": signature,
         "Culture": "ru",
         **shp,

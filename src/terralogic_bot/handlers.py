@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -43,6 +43,7 @@ from .errors import (
     SourceUnavailable,
     TerraLogicUnavailable,
 )
+from .legaldocs import resolve_offer_version
 from .models import CollectionStatus, ListingResolution
 from .payments import (
     PACKAGES,
@@ -116,20 +117,30 @@ LIMIT_REACHED_TEXT = (
     "Покупка отчётов временно недоступна.\n\nНапишите в поддержку — обсудим условия."
 )
 
-PAYWALL_FIRST_TEXT = (
-    "Первый отчёт — {price} по промо-цене, каждый следующий — 3000 ₽.\n\n"
-    "Для оплаты нажмите кнопку ниже — или напишите в поддержку."
+# Карточка заказа показывается до оплаты: предмет, итоговая сумма со скидкой,
+# сроки, акцепт оферты. Кнопки оферты и политики открываются без оплаты.
+ORDER_CARD_TEXT = (
+    "Экспресс-проверка земельного участка\n\n"
+    "Участок: {subject_label}\n"
+    "К оплате: {price_label}{discount_note}\n\n"
+    "Отчёт поступит в этот чат в течение 10 минут после подтверждения "
+    "оплаты. Разбор результатов до 15 минут включён и проводится отдельно "
+    "по запросу.\n\n"
+    "Оплачивая заказ, вы принимаете условия Публичной оферты и "
+    "подтверждаете ознакомление с Политикой обработки персональных "
+    "данных — кнопки ниже."
 )
 
-PAYWALL_TEXT = (
-    "Каждый следующий отчёт — {price}.\n\n"
-    "Для оплаты нажмите кнопку ниже — или напишите в поддержку."
+ORDER_CARD_DISCOUNT_NOTE = " (промо-цена первого заказа, обычная — 3000 ₽)"
+
+ORDER_CHANGED_TEXT = (
+    "Заказ отменён.\n\n"
+    "Отправьте кадастровый номер другого участка, ссылку на объявление "
+    "или координаты — сформирую новую карточку заказа."
 )
 
-PAY_INVOICE_TEXT = (
-    "Счёт на {title} — {price}.\n\n"
-    "Оплатите по кнопке ниже — подтверждение придёт автоматически. "
-    "Если сообщения долго нет, нажмите «Проверить оплату»."
+PAY_PAID_REPORT_TEXT = (
+    "Оплата получена ✅\n\nФормирую экспресс-оценку участка {subject_label}."
 )
 
 PAY_PAID_TEXT = (
@@ -145,14 +156,14 @@ PAY_PENDING_TEXT = (
 )
 
 PAY_CANCELLED_TEXT = (
-    "Этот счёт отменён или истёк.\n\nВыберите пакет ещё раз — сформирую новый счёт."
+    "Этот счёт отменён или истёк.\n\nОтправьте номер ещё раз — сформирую новый заказ."
 )
 
 PAY_FAILED_TEXT = "Не удалось проверить оплату.\n\nПопробуйте ещё раз чуть позже."
 
-PAY_ALREADY_TEXT = "Оплата уже подтверждена — отчёты начислены ✅"
+PAY_ALREADY_TEXT = "Оплата уже подтверждена — заказ в работе ✅"
 
-_PAY_BUY_PREFIX = "pay:buy:"
+_ORDER_CHANGE_PREFIX = "order:change:"
 _PAY_CHECK_PREFIX = "pay:check:"
 
 LISTING_FAILED_TEXT = (
@@ -603,19 +614,258 @@ async def _send_demo_report(
         LOGGER.warning("demo report send failed: %s", path, exc_info=True)
 
 
+class ChatSender(Protocol):
+    """Минимальный контракт получателя отчёта: aiogram Message или BotChatSender."""
+
+    async def answer(self, text: str, **kwargs: Any) -> Any: ...
+
+    async def answer_document(
+        self, document: Any, **kwargs: Any
+    ) -> Any: ...
+
+
+class BotChatSender:
+    """ChatSender по chat_id: автозапуск отчёта из webhook'а оплаты."""
+
+    def __init__(self, bot: Any, chat_id: int) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+
+    async def answer(self, text: str, **kwargs: Any) -> Any:
+        return await self._bot.send_message(self._chat_id, text, **kwargs)
+
+    async def answer_document(self, document: Any, **kwargs: Any) -> Any:
+        return await self._bot.send_document(self._chat_id, document, **kwargs)
+
+
+class ReportService:
+    """Запуск фоновых задач отчётов: дедупликация (user_id, предмет) + семафор.
+
+    Общий для обработчика сообщений и автозапуска по оплаченному заказу
+    (ResultURL-webhook или кнопка «Проверить оплату»).
+    """
+
+    def __init__(
+        self, client: TerraLogicClient, settings: Settings, quota: QuotaStore
+    ) -> None:
+        self._client = client
+        self._settings = settings
+        self._quota = quota
+        self._semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
+        self._jobs: dict[tuple[int, str], asyncio.Task] = {}
+
+    def has_active(self, user_id: int, subject: str) -> bool:
+        """Идёт ли уже формирование отчёта для этого пользователя и предмета."""
+        return (user_id, subject) in self._jobs
+
+    def start(
+        self,
+        *,
+        sender: ChatSender,
+        user_id: int,
+        cadastral_number: str | None = None,
+        listing_url: str | None = None,
+        coordinates: str | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        """Запустить формирование отчёта; False, если такая задача уже идёт."""
+        subject = cadastral_number or listing_url or coordinates
+        assert subject is not None  # вызывающий передаёт ровно один вход
+        key = (user_id, subject)
+        if key in self._jobs:
+            return False
+        request_id = request_id or uuid.uuid4().hex[:8]
+        task = asyncio.create_task(
+            _report_job(
+                message=sender,  # type: ignore[arg-type]  # ChatSender-контракт
+                client=self._client,
+                semaphore=self._semaphore,
+                jobs=self._jobs,
+                key=key,
+                request_id=request_id,
+                cadastral_number=cadastral_number,
+                listing_url=listing_url,
+                coordinates=coordinates,
+                quota=self._quota,
+                report_limit=self._settings.report_limit,
+            )
+        )
+        self._jobs[key] = task
+        return True
+
+
+def _order_subject(
+    cadastral_number: str | None,
+    listing_url: str | None,
+    coordinates: str | None,
+) -> tuple[str, str, str]:
+    """(kind, subject, label) предмета заказа по входу пользователя."""
+    if cadastral_number is not None:
+        return "cadastral", cadastral_number, cadastral_number
+    if listing_url is not None:
+        return "listing", listing_url, "по ссылке на объявление"
+    assert coordinates is not None  # гарантировано веткой INVALID_TEXT
+    return "coords", coordinates, f"по координатам {coordinates}"
+
+
+def order_card_keyboard(
+    *,
+    payment_url: str,
+    inv_id: int,
+    price_label: str,
+    offer_url: str | None,
+    privacy_url: str | None,
+) -> InlineKeyboardMarkup:
+    """Карточка заказа: оплата, смена участка, проверка, оферта и политика."""
+    rows = [
+        [InlineKeyboardButton(text=f"💳 Оплатить {price_label}", url=payment_url)],
+        [
+            InlineKeyboardButton(
+                text="✏️ Изменить участок",
+                callback_data=f"{_ORDER_CHANGE_PREFIX}{inv_id}",
+            ),
+            InlineKeyboardButton(
+                text="🔄 Проверить оплату",
+                callback_data=f"{_PAY_CHECK_PREFIX}{inv_id}",
+            ),
+        ],
+    ]
+    doc_buttons = []
+    if offer_url:
+        doc_buttons.append(
+            InlineKeyboardButton(text="📄 Публичная оферта", url=offer_url)
+        )
+    if privacy_url:
+        doc_buttons.append(
+            InlineKeyboardButton(text="🔒 Политика ПД", url=privacy_url)
+        )
+    if doc_buttons:
+        rows.append(doc_buttons)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_order_card(
+    message: Message,
+    *,
+    settings: Settings,
+    quota: QuotaStore,
+    user_id: int,
+    cadastral_number: str | None,
+    listing_url: str | None,
+    coordinates: str | None,
+) -> None:
+    """Карточка заказа до оплаты: предмет, цена, сроки, оферта и политика.
+
+    Счёт регистрируется сразу (inv_id — номер заказа) с предметом и
+    версией оферты: после подтверждения оплаты отчёт стартует автоматически.
+    """
+    first = not quota.has_paid_payment(user_id)
+    package = package_for_user(PACKAGES[0].code, first_purchase=first)
+    assert package is not None  # PACKAGES непуст по контракту payments
+    kind, subject, label = _order_subject(cadastral_number, listing_url, coordinates)
+    offer_version = resolve_offer_version(settings)
+    inv_id = quota.create_payment(
+        user_id,
+        package_code=package.code,
+        reports=package.reports,
+        amount_rub=package.price_rub,
+        subject_kind=kind,
+        subject=subject,
+        offer_version=offer_version,
+    )
+    url = build_payment_url(
+        merchant_login=settings.robokassa_merchant_login or "",
+        password1=settings.robokassa_password1 or "",
+        inv_id=inv_id,
+        package=package,
+        user_id=user_id,
+        test=settings.robokassa_test,
+        description=f"TerraLogicX: экспресс-проверка участка — {label}",
+    )
+    LOGGER.info(
+        "order card: user=%s inv=%s kind=%s amount=%s offer=%s test=%s",
+        user_id,
+        inv_id,
+        kind,
+        package.price_rub,
+        offer_version,
+        settings.robokassa_test,
+    )
+    await message.answer(
+        ORDER_CARD_TEXT.format(
+            subject_label=label,
+            price_label=package.price_label,
+            discount_note=ORDER_CARD_DISCOUNT_NOTE if first else "",
+        ),
+        reply_markup=order_card_keyboard(
+            payment_url=url,
+            inv_id=inv_id,
+            price_label=package.price_label,
+            offer_url=settings.offer_url,
+            privacy_url=settings.privacy_url,
+        ),
+    )
+
+
+async def fulfill_paid_order(
+    *,
+    payment: Mapping[str, Any],
+    service: ReportService,
+    sender: ChatSender,
+) -> bool:
+    """Автозапуск отчёта по оплаченному заказу с предметом.
+
+    Возвращает False для счетов без предмета (старая схема: начислены
+    кредиты, пользователь пришлёт номер сам). Кредит, начисленный за
+    заказ, списывается самой задачей отчёта после доставки PDF; если
+    формирование не удалось, кредит остаётся у пользователя.
+    """
+    kind = str(payment.get("subject_kind") or "")
+    subject = str(payment.get("subject") or "")
+    if not kind or not subject:
+        return False
+    user_id = int(payment["user_id"])  # type: ignore[arg-type]
+    label = _order_subject(
+        subject if kind == "cadastral" else None,
+        subject if kind == "listing" else None,
+        subject if kind == "coords" else None,
+    )[2]
+    try:
+        await sender.answer(PAY_PAID_REPORT_TEXT.format(subject_label=label))
+    except TelegramAPIError:
+        LOGGER.warning("paid ack send failed: user=%s", user_id)
+    started = service.start(
+        sender=sender,
+        user_id=user_id,
+        cadastral_number=subject if kind == "cadastral" else None,
+        listing_url=subject if kind == "listing" else None,
+        coordinates=subject if kind == "coords" else None,
+    )
+    if not started:
+        try:
+            await sender.answer(DUPLICATE_TEXT)
+        except TelegramAPIError:
+            LOGGER.debug("duplicate notice send failed: user=%s", user_id)
+    return True
+
+
 def build_router(
     client: TerraLogicClient,
     settings: Settings,
     quota: QuotaStore | None = None,
     payment_checker: Callable[[int], Awaitable[str]] | None = None,
+    report_service: ReportService | None = None,
 ) -> Router:
-    """Router с замкнутыми зависимостями: client, лимиты, active jobs.
+    """Router с замкнутыми зависимостями: client, лимиты, запуск отчётов.
 
     payment_checker(inv_id) -> 'paid' | 'pending' | 'cancelled' — точка
     инъекции для тестов; по умолчанию реальный опрос Robokassa OpStateExt.
+    report_service общий с webhook'ом оплаты: дедупликация задач сквозная.
     """
     if quota is None:
         quota = QuotaStore(":memory:")
+    if report_service is None:
+        report_service = ReportService(client, settings, quota)
     if payment_checker is None and settings.payments_enabled:
 
         async def payment_checker(inv_id: int) -> str:  # type: ignore[no-redef]
@@ -626,8 +876,6 @@ def build_router(
             )
 
     router = Router(name="terralogicx-bot")
-    semaphore = asyncio.Semaphore(settings.max_concurrent_reports)
-    jobs: dict[tuple[int, str], asyncio.Task] = {}
     demo_file_ids: dict[str, str] = {}
 
     @router.message(CommandStart())
@@ -713,28 +961,14 @@ def build_router(
         ):
             LOGGER.info("%s limit reached: user=%s", request_id, user_id)
             if settings.payments_enabled:
-                first = not quota.has_paid_payment(user_id)
-                priced = [
-                    package
-                    for package in (
-                        package_for_user(p.code, first_purchase=first) for p in PACKAGES
-                    )
-                    if package is not None
-                ]
-                buttons = [
-                    [
-                        InlineKeyboardButton(
-                            text=f"💳 {package.title} — {package.price_label}",
-                            callback_data=f"{_PAY_BUY_PREFIX}{package.code}",
-                        )
-                    ]
-                    for package in priced
-                ]
-                buttons.append([support_start_button()])
-                paywall_text = PAYWALL_FIRST_TEXT if first else PAYWALL_TEXT
-                await message.answer(
-                    paywall_text.format(price=priced[0].price_label),
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                await _send_order_card(
+                    message,
+                    settings=settings,
+                    quota=quota,
+                    user_id=user_id,
+                    cadastral_number=cadastral_number,
+                    listing_url=listing_url,
+                    coordinates=coordinates,
                 )
             else:
                 await message.answer(
@@ -744,98 +978,49 @@ def build_router(
                     ),
                 )
             return
+        subject = cadastral_number or listing_url or coordinates
+        assert subject is not None  # гарантировано веткой INVALID_TEXT
+        if report_service.has_active(user_id, subject):
+            await message.answer(DUPLICATE_TEXT)
+            return
         if cadastral_number is not None:
-            key = (user_id, cadastral_number)
-            if key in jobs:
-                await message.answer(DUPLICATE_TEXT)
-                return
             LOGGER.info(
                 "%s accepted: user=%s kn=%s", request_id, user_id, cadastral_number
             )
-            await _send_ack(
-                message,
-                f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку.",
-                request_id=request_id,
-                user_id=user_id,
-                label=cadastral_number,
-            )
-            task = asyncio.create_task(
-                _report_job(
-                    message=message,
-                    client=client,
-                    semaphore=semaphore,
-                    jobs=jobs,
-                    key=key,
-                    request_id=request_id,
-                    cadastral_number=cadastral_number,
-                    quota=quota,
-                    report_limit=settings.report_limit,
-                )
+            ack_text = (
+                f"Принял участок {cadastral_number}.\n\nФормирую экспресс-оценку."
             )
         elif listing_url is not None:
-            key = (user_id, listing_url)
-            if key in jobs:
-                await message.answer(DUPLICATE_TEXT)
-                return
             LOGGER.info(
                 "%s accepted listing: user=%s url=%s",
                 request_id,
                 user_id,
                 listing_url,
             )
-            await _send_ack(
-                message,
-                LISTING_ACCEPTED_TEXT,
-                request_id=request_id,
-                user_id=user_id,
-                label=listing_url,
-            )
-            task = asyncio.create_task(
-                _report_job(
-                    message=message,
-                    client=client,
-                    semaphore=semaphore,
-                    jobs=jobs,
-                    key=key,
-                    request_id=request_id,
-                    listing_url=listing_url,
-                    quota=quota,
-                    report_limit=settings.report_limit,
-                )
-            )
+            ack_text = LISTING_ACCEPTED_TEXT
         else:
-            assert coordinates is not None  # гарантировано веткой INVALID_TEXT
-            key = (user_id, coordinates)
-            if key in jobs:
-                await message.answer(DUPLICATE_TEXT)
-                return
             LOGGER.info(
                 "%s accepted coords: user=%s coords=%s",
                 request_id,
                 user_id,
                 coordinates,
             )
-            await _send_ack(
-                message,
-                COORDS_ACCEPTED_TEXT,
-                request_id=request_id,
-                user_id=user_id,
-                label=coordinates,
-            )
-            task = asyncio.create_task(
-                _report_job(
-                    message=message,
-                    client=client,
-                    semaphore=semaphore,
-                    jobs=jobs,
-                    key=key,
-                    request_id=request_id,
-                    coordinates=coordinates,
-                    quota=quota,
-                    report_limit=settings.report_limit,
-                )
-            )
-        jobs[key] = task
+            ack_text = COORDS_ACCEPTED_TEXT
+        await _send_ack(
+            message,
+            ack_text,
+            request_id=request_id,
+            user_id=user_id,
+            label=subject,
+        )
+        report_service.start(
+            sender=message,
+            user_id=user_id,
+            cadastral_number=cadastral_number,
+            listing_url=listing_url if cadastral_number is None else None,
+            coordinates=coordinates if cadastral_number is None else None,
+            request_id=request_id,
+        )
 
     @router.callback_query(F.data.startswith(f"{_FEEDBACK_PREFIX}:"))
     async def feedback(query: CallbackQuery) -> None:
@@ -880,66 +1065,39 @@ def build_router(
             except TelegramAPIError:  # устаревшее сообщение — оценка уже сохранена
                 LOGGER.debug("feedback keyboard not removed: kn=%s", cadastral_number)
 
-    @router.callback_query(F.data.startswith(_PAY_BUY_PREFIX))
-    async def pay_buy(query: CallbackQuery) -> None:
-        """Выбор пакета на paywall-экране: создать счёт и дать ссылку."""
+    @router.callback_query(F.data.startswith(_ORDER_CHANGE_PREFIX))
+    async def order_change(query: CallbackQuery) -> None:
+        """«Изменить участок»: снять клавиатуру карточки и ждать новый вход.
+
+        Сам счёт в БД не отменяется: если пользователь всё же оплатит его,
+        заказ будет исполнен — оплаченные деньги не должны оставаться
+        без результата.
+        """
         remember_user(quota, query.from_user)
-        if not settings.payments_enabled:
-            await query.answer()
-            return
         user_id = query.from_user.id if query.from_user else None
-        if user_id is None:
+        raw_id = (query.data or "")[len(_ORDER_CHANGE_PREFIX) :]
+        inv_id = int(raw_id) if raw_id.isdigit() else 0
+        payment = quota.get_payment(inv_id) if inv_id else None
+        if (
+            payment is None
+            or user_id is None
+            or payment["user_id"] != user_id
+            or payment["status"] != "pending"
+        ):
             await query.answer()
             return
-        # цену определяем на сервере: первая покупка — промо-цена
-        package = package_for_user(
-            (query.data or "")[len(_PAY_BUY_PREFIX) :],
-            first_purchase=not quota.has_paid_payment(user_id),
-        )
-        if package is None:
-            await query.answer()
-            return
-        inv_id = quota.create_payment(
-            user_id,
-            package_code=package.code,
-            reports=package.reports,
-            amount_rub=package.price_rub,
-        )
-        url = build_payment_url(
-            merchant_login=settings.robokassa_merchant_login or "",
-            password1=settings.robokassa_password1 or "",
-            inv_id=inv_id,
-            package=package,
-            user_id=user_id,
-            test=settings.robokassa_test,
-        )
-        LOGGER.info(
-            "payment invoice: user=%s inv=%s package=%s amount=%s test=%s",
-            user_id,
-            inv_id,
-            package.code,
-            package.price_rub,
-            settings.robokassa_test,
-        )
         await query.answer()
-        await query.message.answer(
-            PAY_INVOICE_TEXT.format(title=package.title, price=package.price_label),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
-                    [
-                        InlineKeyboardButton(
-                            text="🔄 Проверить оплату",
-                            callback_data=f"{_PAY_CHECK_PREFIX}{inv_id}",
-                        )
-                    ],
-                ]
-            ),
-        )
+        message = query.message
+        if message is not None:
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except TelegramAPIError:
+                LOGGER.debug("order card keyboard not removed: inv=%s", inv_id)
+            await message.answer(ORDER_CHANGED_TEXT)
 
     @router.callback_query(F.data.startswith(_PAY_CHECK_PREFIX))
     async def pay_check(query: CallbackQuery) -> None:
-        """«Проверить оплату»: опросить состояние счёта и начислить пакет."""
+        """«Проверить оплату»: опросить состояние счёта и исполнить заказ."""
         remember_user(quota, query.from_user)
         user_id = query.from_user.id if query.from_user else None
         raw_id = (query.data or "")[len(_PAY_CHECK_PREFIX) :]
@@ -973,9 +1131,13 @@ def build_router(
                     paid["reports"],
                 )
                 await query.answer()
-                await query.message.answer(
-                    PAY_PAID_TEXT.format(reports=paid["reports"])
+                fulfilled = await fulfill_paid_order(
+                    payment=paid, service=report_service, sender=query.message
                 )
+                if not fulfilled:  # заказ без предмета — старая схема кредитов
+                    await query.message.answer(
+                        PAY_PAID_TEXT.format(reports=paid["reports"])
+                    )
             else:  # параллельный клик или webhook уже зачли
                 await query.answer(PAY_ALREADY_TEXT)
             return
