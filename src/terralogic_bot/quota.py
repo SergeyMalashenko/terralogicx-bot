@@ -260,7 +260,13 @@ class QuotaStore:
         return row is not None
 
     def mark_payment_paid(self, inv_id: int) -> dict[str, object] | None:
-        """Перевести счёт в 'paid' и начислить кредиты.
+        """Перевести счёт в 'paid'; счёту без предмета — начислить кредиты.
+
+        Счёт с предметом (карточка заказа) исполняется автозапуском отчёта,
+        кредиты ему не начисляются: иначе в окне между оплатой и доставкой
+        PDF кредит можно было потратить на другой участок — два отчёта за
+        одну оплату. Если автозапущенный отчёт не сформируется, кредит на
+        повтор выдаётся при ошибке (failure_credit в handlers).
 
         Идемпотентно: повторный вызов по уже оплаченному счёту ничего не
         начисляет и возвращает None.
@@ -275,20 +281,33 @@ class QuotaStore:
                 self._conn.commit()
                 return None
             row = self._conn.execute(
-                "SELECT user_id, reports FROM payments WHERE inv_id = ?",
+                "SELECT user_id, reports, subject FROM payments WHERE inv_id = ?",
                 (inv_id,),
             ).fetchone()
-            user_id, reports = int(row[0]), int(row[1])
-            self._conn.execute(
-                "INSERT INTO report_credits (user_id, credits) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET "
-                "credits = credits + excluded.credits",
-                (user_id, reports),
-            )
+            user_id, reports, subject = int(row[0]), int(row[1]), row[2]
+            if subject is None:
+                self._conn.execute(
+                    "INSERT INTO report_credits (user_id, credits) VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET "
+                    "credits = credits + excluded.credits",
+                    (user_id, reports),
+                )
             self._conn.commit()
         payment = self.get_payment(inv_id)
         assert payment is not None
         return payment
+
+    def grant_credits(self, user_id: int, credits: int) -> int:
+        """Выдать платные кредиты (компенсация за неисполненный заказ)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO report_credits (user_id, credits) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "credits = credits + excluded.credits",
+                (user_id, credits),
+            )
+            self._conn.commit()
+        return self.credits(user_id)
 
     def record(self, user_id: int) -> int:
         """Учесть выданный отчёт; вернуть новое значение счётчика."""

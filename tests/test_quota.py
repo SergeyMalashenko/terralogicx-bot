@@ -281,3 +281,31 @@ def test_offer_versions_registered_once_and_readable(tmp_path):
     assert store.offer_text("2099-01-01") is None
     assert store.list_offer_versions() == ["2026-11-26", "2026-12-01"]
     store.close()
+
+
+def test_payment_with_subject_grants_no_credits(tmp_path):
+    """Счёт с предметом исполняется автозапуском — кредиты не начисляются,
+    иначе они доступны для другого участка, пока отчёт формируется."""
+    store = QuotaStore(tmp_path / "quota.sqlite3")
+    inv_id = store.create_payment(
+        42,
+        package_code="report1",
+        reports=1,
+        amount_rub=3000.0,
+        subject_kind="cadastral",
+        subject="50:21:0030210:123",
+        offer_version="2026-11-26",
+    )
+    store.mark_payment_paid(inv_id)
+    assert store.credits(42) == 0
+
+    # а счёт без предмета (старая схема) — по-прежнему начисляет
+    inv2 = store.create_payment(
+        42, package_code="report1", reports=1, amount_rub=3000.0
+    )
+    store.mark_payment_paid(inv2)
+    assert store.credits(42) == 1
+
+    # компенсация за неисполненный заказ
+    assert store.grant_credits(42, 1) == 2
+    store.close()

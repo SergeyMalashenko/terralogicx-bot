@@ -1075,6 +1075,61 @@ async def test_fulfill_paid_order_without_subject_keeps_credit(tmp_path):
     assert quota.credits(42) == 1
 
 
+async def test_new_subject_during_paid_report_requires_new_payment(tmp_path):
+    """Регрессия: во время формирования оплаченного отчёта новый номер идёт
+    только по новой карточке заказа, а не по кредиту текущего заказа."""
+    quota = _exhausted_quota()
+    client = FakeClient()
+    client.gate = asyncio.Event()
+
+    async def fake_checker(inv: int) -> str:
+        return "paid"
+
+    router = build_router(
+        client, _paid_settings(tmp_path), quota, payment_checker=fake_checker
+    )
+    message = FakeMessage(KN)
+    await _handler(router, "cadastral")(message)  # карточка заказа, inv=1
+    query = FakeCallbackQuery("pay:check:1", user_id=42)
+    await _callback_handler(router, "pay_check")(query)  # оплата → автозапуск
+    await _wait_for(lambda: client.active == 1)
+
+    # пока заказанный отчёт формируется, новый номер — новая карточка заказа
+    second = FakeMessage("50:21:0030210:124")
+    await _handler(router, "cadastral")(second)
+    assert any("Экспресс-проверка" in text for text in second.answers)
+    assert client.calls == [KN]  # второй отчёт бесплатно не запущен
+    assert quota.credits(42) == 0  # кредит и не начислялся за заказ с предметом
+
+    client.gate.set()
+    await _wait_for(lambda: len(query.message.documents) == 1)
+
+
+async def test_failed_paid_order_grants_retry_credit(tmp_path):
+    """Автозапущенный по оплате отчёт упал → оплата превращается в кредит."""
+    quota = _exhausted_quota()
+    client = FakeClient()
+    client.error = TerraLogicUnavailable("backend down")
+    service = ReportService(client, _paid_settings(tmp_path), quota)
+    inv_id = quota.create_payment(
+        42,
+        package_code="report1",
+        reports=1,
+        amount_rub=3000.0,
+        subject_kind="cadastral",
+        subject=KN,
+        offer_version="2026-11-26",
+    )
+    paid = quota.mark_payment_paid(inv_id)
+    assert paid is not None
+    assert quota.credits(42) == 0  # счёт с предметом кредитов не начисляет
+
+    message = FakeMessage(None, user_id=42)
+    await fulfill_paid_order(payment=paid, service=service, sender=message)
+    await _wait_for(lambda: quota.credits(42) == 1)  # кредит на повтор
+    assert UNAVAILABLE_TEXT in message.answers
+
+
 async def test_paid_user_gets_report_after_purchase(tmp_path):
     """После покупки пакета запрос снова идёт в backend и списывает кредит."""
     quota = _exhausted_quota()

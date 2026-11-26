@@ -439,17 +439,22 @@ async def _report_job(
     coordinates: str | None = None,
     quota: QuotaStore | None = None,
     report_limit: int = 5,
+    failure_credit: bool = False,
 ) -> None:
     """Фоновая задача: существующий use case TerraLogicX → PDF → Telegram.
 
     Три входа: кадастровый номер, ссылка на объявление либо координаты
     (резолюция в КН выполняется контуром engine на стороне сервера).
     Квота списывается только за успешно доставленный PDF.
+    failure_credit=True (автозапуск по оплаченному заказу): при любой
+    недоставке PDF пользователю выдаётся кредит на повтор — оплата не
+    пропадает вместе с упавшим формированием.
     """
     started = monotonic()
     user_id = key[0]
     label = cadastral_number or listing_url or coordinates or "?"
     latest = {"percent": 0.0}
+    delivered = False
 
     def _on_progress(percent: float) -> None:
         latest["percent"] = max(latest["percent"], percent)
@@ -498,6 +503,7 @@ async def _report_job(
             caption=f"Экспресс-оценка участка\n{resolved}",
             reply_markup=feedback_keyboard(resolved),
         )
+        delivered = True
         if quota is not None:
             source = quota.consume(user_id, report_limit)
             LOGGER.info("%s quota: user=%s source=%s", request_id, user_id, source)
@@ -548,6 +554,15 @@ async def _report_job(
         await message.answer(FAILED_TEXT)
         LOGGER.exception("%s unexpected: user=%s kn=%s", request_id, user_id, label)
     finally:
+        if failure_credit and not delivered and quota is not None:
+            granted = quota.grant_credits(user_id, 1)
+            LOGGER.info(
+                "%s failure credit: user=%s input=%s credits=%s",
+                request_id,
+                user_id,
+                label,
+                granted,
+            )
         ticker.cancel()
         try:
             await ticker
@@ -667,6 +682,7 @@ class ReportService:
         listing_url: str | None = None,
         coordinates: str | None = None,
         request_id: str | None = None,
+        failure_credit: bool = False,
     ) -> bool:
         """Запустить формирование отчёта; False, если такая задача уже идёт."""
         subject = cadastral_number or listing_url or coordinates
@@ -688,6 +704,7 @@ class ReportService:
                 coordinates=coordinates,
                 quota=self._quota,
                 report_limit=self._settings.report_limit,
+                failure_credit=failure_credit,
             )
         )
         self._jobs[key] = task
@@ -816,9 +833,9 @@ async def fulfill_paid_order(
     """Автозапуск отчёта по оплаченному заказу с предметом.
 
     Возвращает False для счетов без предмета (старая схема: начислены
-    кредиты, пользователь пришлёт номер сам). Кредит, начисленный за
-    заказ, списывается самой задачей отчёта после доставки PDF; если
-    формирование не удалось, кредит остаётся у пользователя.
+    кредиты, пользователь пришлёт номер сам). Счёт с предметом кредитов не
+    начисляет — оплаченный результат это сам отчёт; если формирование не
+    удастся, задача выдаст кредит на повтор (failure_credit).
     """
     kind = str(payment.get("subject_kind") or "")
     subject = str(payment.get("subject") or "")
@@ -840,6 +857,7 @@ async def fulfill_paid_order(
         cadastral_number=subject if kind == "cadastral" else None,
         listing_url=subject if kind == "listing" else None,
         coordinates=subject if kind == "coords" else None,
+        failure_credit=True,
     )
     if not started:
         try:
